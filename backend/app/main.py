@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.bootstrap import ensure_admin
 from app.config import get_settings
 from app.db import Base, make_engine, make_session_factory
-from app.routers import auth
+from app.routers import admin, auth
 
 
 @asynccontextmanager
@@ -26,4 +26,5 @@ def create_app() -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.settings = settings
     app.include_router(auth.router)
+    app.include_router(admin.router)
     return app
