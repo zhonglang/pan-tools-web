@@ -26,3 +26,21 @@ class UserOut(BaseModel):
 class PlanUpdateIn(BaseModel):
     plan: str
     plan_expires_at: datetime | None = None
+
+
+class AccountBindIn(BaseModel):
+    provider: str
+    cookie: str = Field(min_length=1, max_length=8192)
+
+
+class AccountCookieIn(BaseModel):
+    cookie: str = Field(min_length=1, max_length=8192)
+
+
+class AccountOut(BaseModel):
+    id: int
+    provider: str
+    nickname: str
+    status: str
+    created_at: datetime
+    updated_at: datetime

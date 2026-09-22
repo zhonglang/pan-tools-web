@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.bootstrap import ensure_admin
 from app.config import get_settings
 from app.db import Base, make_engine, make_session_factory
-from app.routers import admin, auth
+from app.routers import accounts, admin, auth
 
 
 @asynccontextmanager
@@ -18,6 +18,9 @@ async def lifespan(app: FastAPI):
     with app.state.session_factory() as session:
         ensure_admin(session, app.state.settings)
     yield
+    client = getattr(app.state, "pan_http_client", None)
+    if client is not None:
+        client.close()
     engine.dispose()
 
 
@@ -27,4 +30,5 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.include_router(auth.router)
     app.include_router(admin.router)
+    app.include_router(accounts.router)
     return app
