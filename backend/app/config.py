@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     admin_email: str
     admin_password: str
     auto_create_tables: bool = False
+    cookie_fernet_key: str
 
 
 @lru_cache

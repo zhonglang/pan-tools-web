@@ -12,6 +12,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-pass-123")
     monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("AUTO_CREATE_TABLES", "true")
+    monkeypatch.setenv("COOKIE_FERNET_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     get_settings.cache_clear()
     from app.main import create_app
 

@@ -17,6 +17,7 @@ def test_ensure_admin_raises_when_admin_email_taken_by_non_admin():
         jwt_secret="test-secret-key-at-least-32-bytes-long",
         admin_email="admin@example.com",
         admin_password="admin-pass-123",
+        cookie_fernet_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
     )
     with Session(engine) as session:
         session.add(

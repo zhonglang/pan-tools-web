@@ -10,6 +10,7 @@ def test_settings_read_env(monkeypatch):
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-pass-123")
     monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("AUTO_CREATE_TABLES", "true")
+    monkeypatch.setenv("COOKIE_FERNET_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     get_settings.cache_clear()
     settings = get_settings()
     assert settings.database_url == "sqlite+pysqlite:///:memory:"
@@ -17,6 +18,7 @@ def test_settings_read_env(monkeypatch):
     assert settings.admin_email == "admin@example.com"
     assert settings.cookie_secure is False
     assert settings.auto_create_tables is True
+    assert settings.cookie_fernet_key == "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     assert settings.jwt_ttl_seconds == 604800
     get_settings.cache_clear()
 
