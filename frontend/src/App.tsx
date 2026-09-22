@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { api, type User } from "./api";
 import AppShell from "./components/AppShell";
+import AccountsPage from "./pages/AccountsPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import HomePage from "./pages/HomePage";
 import LoginPage from "./pages/LoginPage";
@@ -40,6 +41,18 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage onAuthenticated={onAuthenticated} />} />
       <Route path="/register" element={<RegisterPage onAuthenticated={onAuthenticated} />} />
+      <Route
+        path="/accounts"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <AccountsPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
       <Route
         path="/admin/users"
         element={

@@ -28,6 +28,9 @@ export default function AppShell({
           <NavLink to="/" end className={({ isActive }) => navClass(isActive)}>
             工作台
           </NavLink>
+          <NavLink to="/accounts" className={({ isActive }) => navClass(isActive)}>
+            网盘账号
+          </NavLink>
           {user.role === "admin" ? (
             <NavLink to="/admin/users" className={({ isActive }) => navClass(isActive)}>
               会员管理

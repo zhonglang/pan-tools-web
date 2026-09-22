@@ -8,6 +8,15 @@ export type User = {
   paid_features: boolean;
 };
 
+export type PanAccount = {
+  id: number;
+  provider: string;
+  nickname: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -33,5 +42,16 @@ export const api = {
     request<User>(`/api/admin/users/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ plan, plan_expires_at: planExpiresAt }),
+    }),
+  accounts: () => request<PanAccount[]>("/api/accounts"),
+  bindAccount: (provider: string, cookie: string) =>
+    request<PanAccount>("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify({ provider, cookie }),
+    }),
+  updateAccountCookie: (id: number, cookie: string) =>
+    request<PanAccount>(`/api/accounts/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ cookie }),
     }),
 };
