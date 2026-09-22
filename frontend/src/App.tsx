@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { Button, Layout, Typography } from "antd";
 import { api, type User } from "./api";
+import AppShell from "./components/AppShell";
+import AdminUsersPage from "./pages/AdminUsersPage";
+import HomePage from "./pages/HomePage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
-import AdminUsersPage from "./pages/AdminUsersPage";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -23,41 +24,46 @@ export default function App() {
     setUser(next);
   }
 
+  async function onLogout() {
+    await api.logout();
+    setUser(null);
+    navigate("/login");
+  }
+
+  if (loading) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-canvas text-sm text-ink/60">正在确认登录状态</div>
+    );
+  }
+
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <Layout.Header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <Typography.Text style={{ color: "white" }}>网盘工具</Typography.Text>
-        {user ? (
-          <Button
-            onClick={async () => {
-              await api.logout();
-              setUser(null);
-              navigate("/login");
-            }}
-          >
-            退出
-          </Button>
-        ) : null}
-      </Layout.Header>
-      <Layout.Content>
-        <Routes>
-          <Route path="/login" element={<LoginPage onAuthenticated={onAuthenticated} />} />
-          <Route path="/register" element={<RegisterPage onAuthenticated={onAuthenticated} />} />
-          <Route
-            path="/admin/users"
-            element={
-              loading ? (
-                <Typography.Paragraph style={{ padding: 24 }}>加载中</Typography.Paragraph>
-              ) : user?.role === "admin" ? (
-                <AdminUsersPage />
-              ) : (
-                <Navigate to="/login" />
-              )
-            }
-          />
-          <Route path="/" element={<Typography.Paragraph style={{ padding: 24 }}>{user ? `已登录：${user.email}（${user.effective_plan}）` : "请登录"}</Typography.Paragraph>} />
-        </Routes>
-      </Layout.Content>
-    </Layout>
+    <Routes>
+      <Route path="/login" element={<LoginPage onAuthenticated={onAuthenticated} />} />
+      <Route path="/register" element={<RegisterPage onAuthenticated={onAuthenticated} />} />
+      <Route
+        path="/admin/users"
+        element={
+          user?.role === "admin" ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <AdminUsersPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <HomePage user={user} />
+            </AppShell>
+          ) : (
+            <HomePage user={null} />
+          )
+        }
+      />
+    </Routes>
   );
 }
