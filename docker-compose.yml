@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: pan
+      POSTGRES_PASSWORD: pan
+      POSTGRES_DB: pan
+    ports:
+      - "5432:5432"
+    volumes:
+      - pan_pg:/var/lib/postgresql/data
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://pan:pan@db:5432/pan
+      JWT_SECRET: dev-secret-change-me-to-32-characters
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: admin-pass-123
+      COOKIE_SECURE: "false"
+      AUTO_CREATE_TABLES: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+
+volumes:
+  pan_pg:
