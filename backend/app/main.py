@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.bootstrap import ensure_admin
 from app.config import get_settings
 from app.db import Base, make_engine, make_session_factory
-from app.routers import accounts, admin, auth
+from app.routers import accounts, admin, auth, transfers
 
 
 @asynccontextmanager
@@ -31,4 +31,5 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(accounts.router)
+    app.include_router(transfers.router)
     return app
