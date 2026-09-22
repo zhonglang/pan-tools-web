@@ -91,8 +91,14 @@ def login(
 
 
 @router.post("/logout")
-def logout(response: Response):
-    response.delete_cookie("access_token", path="/")
+def logout(response: Response, settings: Settings = Depends(get_settings)):
+    response.delete_cookie(
+        "access_token",
+        path="/",
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+    )
     return {"ok": True}
 
 

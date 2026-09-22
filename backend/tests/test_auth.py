@@ -33,6 +33,23 @@ def test_register_rejects_duplicate_email(client):
     assert again.json()["detail"] == "邮箱已注册"
 
 
+def test_logout_clears_session_cookie_with_matching_attributes(client):
+    client.post(
+        "/api/auth/register",
+        json={"email": "user@example.com", "password": "password-123"},
+    )
+    client.post(
+        "/api/auth/login",
+        json={"email": "user@example.com", "password": "password-123"},
+    )
+    logout = client.post("/api/auth/logout")
+    assert logout.status_code == 200
+    cookie = logout.headers.get("set-cookie", "")
+    assert "access_token=" in cookie
+    assert "HttpOnly" in cookie
+    assert "Secure" not in cookie
+
+
 def test_login_and_me(client):
     client.post("/api/auth/register", json={"email": "user@example.com", "password": "password-123"})
     client.post("/api/auth/logout")
