@@ -33,7 +33,7 @@ export default function AdminUsersPage() {
                 onChange={(value) => setExpiry({ ...expiry, [user.id]: value })}
               />
               <Select
-                defaultValue={user.plan}
+                value={user.plan}
                 style={{ width: 100 }}
                 options={[
                   { value: "free", label: "免费" },
