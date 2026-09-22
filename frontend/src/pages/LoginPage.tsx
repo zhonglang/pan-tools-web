@@ -1,8 +1,12 @@
 import { Button, Form, Input, Typography, message } from "antd";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, type User } from "../api";
 
-export default function LoginPage() {
+type LoginPageProps = {
+  onAuthenticated: (user: User) => void;
+};
+
+export default function LoginPage({ onAuthenticated }: LoginPageProps) {
   const navigate = useNavigate();
   return (
     <Form
@@ -10,6 +14,7 @@ export default function LoginPage() {
       onFinish={async (values: { email: string; password: string }) => {
         try {
           const user = await api.login(values.email, values.password);
+          onAuthenticated(user);
           navigate(user.role === "admin" ? "/admin/users" : "/");
         } catch (error) {
           message.error(error instanceof Error ? error.message : "登录失败");

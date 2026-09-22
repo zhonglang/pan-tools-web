@@ -1,15 +1,20 @@
 import { Button, Form, Input, Typography, message } from "antd";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, type User } from "../api";
 
-export default function RegisterPage() {
+type RegisterPageProps = {
+  onAuthenticated: (user: User) => void;
+};
+
+export default function RegisterPage({ onAuthenticated }: RegisterPageProps) {
   const navigate = useNavigate();
   return (
     <Form
       style={{ maxWidth: 360, margin: "80px auto" }}
       onFinish={async (values: { email: string; password: string }) => {
         try {
-          await api.register(values.email, values.password);
+          const user = await api.register(values.email, values.password);
+          onAuthenticated(user);
           navigate("/");
         } catch (error) {
           message.error(error instanceof Error ? error.message : "注册失败");

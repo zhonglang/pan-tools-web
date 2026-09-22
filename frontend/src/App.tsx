@@ -8,11 +8,20 @@ import AdminUsersPage from "./pages/AdminUsersPage";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   useEffect(() => {
-    api.me().then(setUser).catch(() => setUser(null));
+    api
+      .me()
+      .then(setUser)
+      .catch(() => setUser(null))
+      .finally(() => setLoading(false));
   }, []);
+
+  function onAuthenticated(next: User) {
+    setUser(next);
+  }
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -32,9 +41,20 @@ export default function App() {
       </Layout.Header>
       <Layout.Content>
         <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/register" element={<RegisterPage />} />
-          <Route path="/admin/users" element={user?.role === "admin" ? <AdminUsersPage /> : <Navigate to="/login" />} />
+          <Route path="/login" element={<LoginPage onAuthenticated={onAuthenticated} />} />
+          <Route path="/register" element={<RegisterPage onAuthenticated={onAuthenticated} />} />
+          <Route
+            path="/admin/users"
+            element={
+              loading ? (
+                <Typography.Paragraph style={{ padding: 24 }}>加载中</Typography.Paragraph>
+              ) : user?.role === "admin" ? (
+                <AdminUsersPage />
+              ) : (
+                <Navigate to="/login" />
+              )
+            }
+          />
           <Route path="/" element={<Typography.Paragraph style={{ padding: 24 }}>{user ? `已登录：${user.email}（${user.effective_plan}）` : "请登录"}</Typography.Paragraph>} />
         </Routes>
       </Layout.Content>
