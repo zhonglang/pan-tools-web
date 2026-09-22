@@ -31,7 +31,7 @@ services:
         condition: service_healthy
   worker:
     build: ./backend
-    command: ["python", "-m", "app.worker"]
+    command: ["sh", "-c", "alembic upgrade head && python -m app.worker"]
     environment:
       DATABASE_URL: postgresql+psycopg://pan:pan@db:5432/pan
       JWT_SECRET: dev-secret-change-me-to-32-characters
