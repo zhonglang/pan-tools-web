@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from app.membership import can_use_paid_features, effective_plan
+from app.membership import baidu_account_limit, can_use_paid_features, effective_plan
 from app.models import User
 
 
@@ -44,3 +44,23 @@ def test_admin_can_use_paid_features_on_free_plan():
     user = _user("admin", "free", None)
     assert effective_plan(user, NOW) == "free"
     assert can_use_paid_features(user, NOW) is True
+
+
+def test_free_user_can_bind_one_baidu_account():
+    user = _user("user", "free", None)
+    assert baidu_account_limit(user, datetime.now(timezone.utc)) == 1
+
+
+def test_paid_user_can_bind_five_baidu_accounts():
+    user = _user("user", "paid", datetime.now(timezone.utc) + timedelta(days=1))
+    assert baidu_account_limit(user, datetime.now(timezone.utc)) == 5
+
+
+def test_expired_paid_user_can_bind_one_baidu_account():
+    user = _user("user", "paid", datetime.now(timezone.utc) - timedelta(days=1))
+    assert baidu_account_limit(user, datetime.now(timezone.utc)) == 1
+
+
+def test_admin_can_bind_five_baidu_accounts():
+    user = _user("admin", "free", None)
+    assert baidu_account_limit(user, datetime.now(timezone.utc)) == 5
