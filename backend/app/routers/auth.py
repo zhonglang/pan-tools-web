@@ -5,11 +5,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.deps import get_db, now_utc
+from app.deps import get_current_user, get_db, now_utc
 from app.membership import can_use_paid_features, effective_plan
 from app.models import User
-from app.schemas import RegisterIn, UserOut
-from app.security import create_access_token, hash_password
+from app.schemas import LoginIn, RegisterIn, UserOut
+from app.security import create_access_token, hash_password, verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -66,4 +66,36 @@ def register(
     session.commit()
     session.refresh(user)
     set_session_cookie(response, user, settings)
+    return to_user_out(user, now_utc())
+
+
+@router.post("/login", response_model=UserOut)
+def login(
+    payload: LoginIn,
+    response: Response,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    email = payload.email.lower()
+    user = session.scalar(select(User).where(func.lower(User.email) == email))
+    password_ok = False
+    if user is not None:
+        try:
+            password_ok = verify_password(payload.password, user.password_hash)
+        except ValueError:
+            password_ok = False
+    if user is None or not password_ok:
+        raise HTTPException(status_code=401, detail="邮箱或密码错误")
+    set_session_cookie(response, user, settings)
+    return to_user_out(user, now_utc())
+
+
+@router.post("/logout")
+def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    return {"ok": True}
+
+
+@router.get("/me", response_model=UserOut)
+def me(user: User = Depends(get_current_user)):
     return to_user_out(user, now_utc())

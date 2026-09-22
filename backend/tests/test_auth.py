@@ -31,3 +31,38 @@ def test_register_rejects_duplicate_email(client):
     again = client.post("/api/auth/register", json=payload)
     assert again.status_code == 409
     assert again.json()["detail"] == "邮箱已注册"
+
+
+def test_login_and_me(client):
+    client.post("/api/auth/register", json={"email": "user@example.com", "password": "password-123"})
+    client.post("/api/auth/logout")
+    denied = client.get("/api/auth/me")
+    assert denied.status_code == 401
+
+    logged_in = client.post(
+        "/api/auth/login",
+        json={"email": "USER@example.com", "password": "password-123"},
+    )
+    assert logged_in.status_code == 200
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == "user@example.com"
+
+
+def test_login_rejects_bad_password(client):
+    client.post("/api/auth/register", json={"email": "user@example.com", "password": "password-123"})
+    response = client.post(
+        "/api/auth/login",
+        json={"email": "user@example.com", "password": "wrong-pass-123"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "邮箱或密码错误"
+
+
+def test_login_rejects_unknown_email(client):
+    response = client.post(
+        "/api/auth/login",
+        json={"email": "missing@example.com", "password": "password-123"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "邮箱或密码错误"
