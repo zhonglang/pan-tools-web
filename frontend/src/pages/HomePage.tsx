@@ -59,7 +59,11 @@ export default function HomePage({ user }: { user: User | null }) {
       </div>
 
       <div className="mt-4 grid gap-4 md:grid-cols-3">
-        {["批量转存", "分享导出", "数据概览"].map((name) => (
+        <Link to="/transfer" className="rounded-3xl border border-line bg-white p-5 transition duration-200 hover:border-primary">
+          <p className="text-sm font-semibold">批量转存</p>
+          <p className="mt-2 text-sm leading-6 text-ink/55">把分享链接保存到自己的目录</p>
+        </Link>
+        {["分享导出", "数据概览"].map((name) => (
           <article key={name} className="rounded-3xl border border-dashed border-line bg-white/70 p-5">
             <p className="text-sm font-semibold">{name}</p>
             <p className="mt-2 text-sm leading-6 text-ink/55">即将开放</p>

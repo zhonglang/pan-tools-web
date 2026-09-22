@@ -31,6 +31,9 @@ export default function AppShell({
           <NavLink to="/accounts" className={({ isActive }) => navClass(isActive)}>
             网盘账号
           </NavLink>
+          <NavLink to="/transfer" className={({ isActive }) => navClass(isActive)}>
+            批量转存
+          </NavLink>
           {user.role === "admin" ? (
             <NavLink to="/admin/users" className={({ isActive }) => navClass(isActive)}>
               会员管理

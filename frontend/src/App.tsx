@@ -5,8 +5,10 @@ import AppShell from "./components/AppShell";
 import AccountsPage from "./pages/AccountsPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import HomePage from "./pages/HomePage";
+import JobPage from "./pages/JobPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
+import TransferPage from "./pages/TransferPage";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -47,6 +49,30 @@ export default function App() {
           user ? (
             <AppShell user={user} onLogout={onLogout}>
               <AccountsPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/transfer"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <TransferPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/jobs/:id"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <JobPage />
             </AppShell>
           ) : (
             <Navigate to="/login" />

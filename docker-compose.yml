@@ -29,6 +29,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://pan:pan@db:5432/pan
+      JWT_SECRET: dev-secret-change-me-to-32-characters
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: admin-pass-123
+      COOKIE_SECURE: "false"
+      AUTO_CREATE_TABLES: "false"
+      COOKIE_FERNET_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pan_pg:

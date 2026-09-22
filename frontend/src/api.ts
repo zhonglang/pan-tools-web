@@ -17,6 +17,19 @@ export type PanAccount = {
   updated_at: string;
 };
 
+export type DirEntry = { name: string; path: string; is_dir: boolean };
+
+export type JobItem = {
+  id: number;
+  status: string;
+  input_text: string;
+  error: string | null;
+  result: string | null;
+  attempts: number;
+};
+
+export type Job = { id: number; status: string; directory: string; items: JobItem[] };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -54,4 +67,13 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ cookie }),
     }),
+
+  files: (accountId: number, dir: string) =>
+    request<DirEntry[]>(`/api/accounts/${accountId}/files?dir=${encodeURIComponent(dir)}`),
+  createTransfer: (accountId: number, directory: string, links: string) =>
+    request<Job>("/api/transfers", {
+      method: "POST",
+      body: JSON.stringify({ account_id: accountId, directory, links }),
+    }),
+  job: (id: string) => request<Job>(`/api/jobs/${id}`),
 };
