@@ -48,13 +48,34 @@ def test_baidu_verify_rejects_non_json():
         adapter_for("baidu", client_for(handler)).verify_login(COOKIE)
 
 
-def test_closed_providers_do_not_call_http():
+def test_xunlei_is_closed():
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("closed provider must not send HTTP")
 
-    for provider in ("quark", "xunlei"):
-        with pytest.raises(ProviderClosed, match="暂未开放"):
-            adapter_for(provider, client_for(handler)).verify_login(COOKIE)
+    with pytest.raises(ProviderClosed, match="暂未开放"):
+        adapter_for("xunlei", client_for(handler)).verify_login(COOKIE)
+
+
+QUARK_COOKIE = "b-user-id=1; __pus=secret"
+
+
+def test_quark_verify_returns_nickname():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "drive-pc.quark.cn"
+        assert request.url.path == "/1/clouddrive/member"
+        assert request.headers["cookie"] == QUARK_COOKIE
+        return httpx.Response(200, json={"status": 200, "data": {"nickname": "夸克昵称"}})
+
+    nickname = adapter_for("quark", client_for(handler)).verify_login(QUARK_COOKIE)
+    assert nickname == "夸克昵称"
+
+
+def test_quark_verify_rejects_bad_cookie():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": 401, "message": "未登录"})
+
+    with pytest.raises(LoginRejected):
+        adapter_for("quark", client_for(handler)).verify_login(QUARK_COOKIE)
 
 
 def test_unknown_provider_is_rejected():

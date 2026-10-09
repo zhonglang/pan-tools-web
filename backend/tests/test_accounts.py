@@ -82,18 +82,64 @@ def test_bind_rejects_blank_cookie(client):
     assert response.json()["detail"] == "Cookie 不能为空"
 
 
-def test_quark_and_xunlei_are_closed(client):
+def test_xunlei_is_closed(client):
     register(client)
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("closed provider must not send HTTP")
 
     client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    for provider in ("quark", "xunlei"):
-        response = client.post("/api/accounts", json={"provider": provider, "cookie": SECRET})
-        assert response.status_code == 422
-        assert response.json()["detail"] == "暂未开放"
+    response = client.post("/api/accounts", json={"provider": "xunlei", "cookie": SECRET})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "暂未开放"
     assert client.get("/api/accounts").json() == []
+
+
+def test_bind_quark_stores_valid_account(client):
+    register(client)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": 200, "data": {"nickname": "夸克昵称"}})
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=1"})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["provider"] == "quark"
+    assert body["nickname"] == "夸克昵称"
+    assert body["status"] == "valid"
+    assert "b-user-id=1" not in response.text
+
+
+def test_bind_quark_rejects_bad_cookie(client):
+    register(client)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": 401, "message": "未登录"})
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=1"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "请重新登录夸克后再粘贴 Cookie"
+    assert client.get("/api/accounts").json() == []
+
+
+def test_free_user_can_bind_one_baidu_and_one_quark(client):
+    register(client)
+    install_baidu(client, {"errno": 0, "netdisk_name": "百度账号"})
+    assert client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET}).status_code == 201
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": 200, "data": {"nickname": "夸克账号"}})
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    first = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=1"})
+    assert first.status_code == 201
+    second = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=2"})
+    assert second.status_code == 422
+    assert second.json()["detail"] == "免费用户只能绑定 1 个夸克账号"
+    providers = [row["provider"] for row in client.get("/api/accounts").json()]
+    assert providers == ["baidu", "quark"]
 
 
 def test_unknown_provider_is_rejected(client):

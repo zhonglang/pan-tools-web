@@ -92,7 +92,8 @@ def verified_nickname(provider: str, cookie: str, client: httpx.Client) -> str:
     except ProviderClosed as exc:
         raise HTTPException(status_code=422, detail="暂未开放") from exc
     except LoginRejected as exc:
-        raise HTTPException(status_code=422, detail="请重新登录百度后再粘贴 Cookie") from exc
+        name = "夸克" if provider == "quark" else "百度"
+        raise HTTPException(status_code=422, detail=f"请重新登录{name}后再粘贴 Cookie") from exc
 
 
 def clean_cookie(cookie: str) -> str:

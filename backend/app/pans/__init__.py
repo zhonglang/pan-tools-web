@@ -10,6 +10,10 @@ __all__ = ["LoginRejected", "ProviderClosed", "adapter_for"]
 def adapter_for(provider: str, client: httpx.Client):
     if provider == "baidu":
         return BaiduAdapter(client)
-    if provider in {"quark", "xunlei"}:
+    if provider == "quark":
+        from app.pans.quark import QuarkAdapter
+
+        return QuarkAdapter(client)
+    if provider == "xunlei":
         return ClosedAdapter()
     raise ValueError("网盘类型无效")
