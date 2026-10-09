@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.crypto import decrypt_cookie
 from app.models import Job, JobItem, PanAccount, ShareLink
-from app.pans.baidu import BaiduAdapter
+from app.pans import adapter_for
 from app.pans.errors import LoginRejected, RateLimited, TransferFailed
 from app.services.transfers import EXPIRED, RETRY_DELAYS, fail_remaining, finish_job
 
@@ -28,7 +28,9 @@ def load_target(raw: str) -> dict:
     name = data.get("name")
     password = data.get("password")
     period = data.get("period")
-    if not isinstance(fs_id, int) or not isinstance(path, str) or not isinstance(name, str):
+    if fs_id is not None and not isinstance(fs_id, int):
+        raise ValueError("条目无效")
+    if not isinstance(path, str) or not isinstance(name, str):
         raise ValueError("条目无效")
     if not isinstance(password, str) or not isinstance(period, str):
         raise ValueError("条目无效")
@@ -53,7 +55,7 @@ def execute_share(
         finish_job(job, items, now)
         return
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
-    adapter = BaiduAdapter(client)
+    adapter = adapter_for(account.provider, client)
     for index, item in enumerate(items):
         if item.status != "pending":
             continue
@@ -77,7 +79,18 @@ def _run_share(session, adapter, item, account, job, cookie, sleeper, now) -> st
         item.status = "running"
         item.updated_at = now
         try:
-            link = adapter.create_share(cookie, target["fs_id"], target["password"], target["period"])
+            created = adapter.create_share(
+                cookie,
+                target.get("fs_id"),
+                target["password"],
+                target["period"],
+                path=target["path"],
+                name=target["name"],
+            )
+            if isinstance(created, tuple):
+                link, share_password = created
+            else:
+                link, share_password = created, target["password"]
         except RateLimited:
             if item.attempts >= 3:
                 item.status = "failed"
@@ -108,7 +121,7 @@ def _run_share(session, adapter, item, account, job, cookie, sleeper, now) -> st
                 name=target["name"],
                 path=target["path"],
                 url=link,
-                password=target["password"],
+                password=share_password,
                 expired=False,
                 status="active",
                 created_at=now,

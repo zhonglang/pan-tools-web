@@ -289,16 +289,20 @@ def share_file(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(4))
     adapter, cookie = open_adapter(session, account, request)
     try:
-        url = adapter.create_share(cookie, body.fs_id, password)
+        created = adapter.create_share(cookie, body.fs_id, password, path=body.path, name=body.name)
+        if isinstance(created, tuple):
+            url, password = created
+        else:
+            url = created
     except LoginRejected as exc:
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except TransferFailed as exc:
         raise HTTPException(status_code=422, detail="分享失败") from exc
     return ShareOut(url=url, password=password)

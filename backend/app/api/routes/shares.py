@@ -14,10 +14,10 @@ from app.crud.jobs import add_item, get_for_user as get_job_for_user
 from app.crud.shares import list_for_job
 from app.models import Job, JobItem, User
 from app.services.membership import can_use_paid_features
-from app.pans.baidu import BaiduAdapter
+from app.pans import adapter_for
 from app.pans.errors import LoginRejected, PathNotFound
 from app.services.quota import PaidRequired, reserve_shares
-from app.api.routes.transfers import owned_baidu, pan_client, to_job
+from app.api.routes.transfers import owned_drive, pan_client, relogin, to_job
 from app.schemas import JobOut, ShareBatchIn
 from app.services.shares import shares_csv
 from app.services.transfers import normalize_directory
@@ -47,7 +47,7 @@ def create_share_job(
 ):
     if not can_use_paid_features(user, now_utc()):
         raise HTTPException(status_code=403, detail=PAID_ONLY)
-    account = owned_baidu(session, user, body.account_id)
+    account = owned_drive(session, user, body.account_id)
     try:
         directory = normalize_directory(body.directory)
     except ValueError as exc:
@@ -66,12 +66,12 @@ def create_share_job(
     if directory != "/":
         cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
         try:
-            BaiduAdapter(pan_client(request)).list_dir(cookie, directory)
+            adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
         except LoginRejected as exc:
             account.status = "expired"
             account.updated_at = moment
             session.commit()
-            raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+            raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
         except PathNotFound as exc:
             raise HTTPException(status_code=422, detail="目标目录不存在") from exc
     try:

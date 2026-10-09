@@ -34,7 +34,9 @@ class RenameIn(BaseModel):
 
 
 class ShareIn(BaseModel):
-    fs_id: int
+    fs_id: int | None = None
+    path: str | None = None
+    name: str | None = None
 
 
 class ShareOut(BaseModel):

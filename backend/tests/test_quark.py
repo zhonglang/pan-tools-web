@@ -90,6 +90,33 @@ def test_transfer_share_saves_top_level_files():
     assert saved["body"]["pwd_id"] == "abc"
 
 
+def test_quark_create_share_returns_url_and_password():
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/share/password"):
+            return httpx.Response(
+                200,
+                json={"status": 200, "data": {"share_url": "https://pan.quark.cn/s/share1", "passcode": "abcd"}},
+            )
+        if path.endswith("/task"):
+            return httpx.Response(200, json={"status": 200, "data": {"status": 2, "share_id": "share-id"}})
+        if path.endswith("/share"):
+            return httpx.Response(200, json={"status": 200, "data": {"task_id": "task-1"}})
+        raise AssertionError(path)
+
+    url, password = adapter_for("quark", client_for(handler)).create_share(
+        COOKIE,
+        None,
+        "wxyz",
+        "0",
+        path="/fid-1",
+        name="电影",
+        sleeper=lambda _seconds: None,
+    )
+    assert url == "https://pan.quark.cn/s/share1"
+    assert password == "abcd"
+
+
 def test_transfer_share_rejects_bad_password():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"status": 400, "message": "提取码错误"})

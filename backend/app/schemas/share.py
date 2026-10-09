@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 
 
 class ShareTargetIn(BaseModel):
-    fs_id: int
+    fs_id: int | None = None
     path: str = Field(min_length=1, max_length=1024)
     name: str = Field(min_length=1, max_length=255)
 

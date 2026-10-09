@@ -211,13 +211,55 @@ class QuarkAdapter:
             raise TransferFailed()
         self._wait_task(cookie, task_id, wait)
 
-    def _wait_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> None:
+    def create_share(
+        self,
+        cookie: str,
+        fs_id: int | None,
+        password: str,
+        period: str = "0",
+        path: str | None = None,
+        name: str | None = None,
+        *,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> tuple[str, str]:
+        wait = sleeper or time.sleep
+        fid = _fid(path or "")
+        if fid == "0":
+            raise TransferFailed()
+        expired_type = {"0": 1, "7": 2, "1": 3}.get(period, 1)
+        created = self._post(
+            "/share",
+            cookie,
+            {
+                "fid_list": [fid],
+                "title": name or "分享",
+                "url_type": 1,
+                "expired_type": expired_type,
+            },
+        )
+        task_data = created.get("data") if isinstance(created.get("data"), dict) else {}
+        task_id = task_data.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise TransferFailed()
+        finished = self._wait_task(cookie, task_id, wait)
+        share_id = finished.get("share_id")
+        if not isinstance(share_id, str) or not share_id:
+            raise TransferFailed()
+        shared = self._post("/share/password", cookie, {"share_id": share_id})
+        data = shared.get("data") if isinstance(shared.get("data"), dict) else {}
+        url = data.get("share_url")
+        code = data.get("passcode") or password
+        if not isinstance(url, str) or not url or not isinstance(code, str) or not code:
+            raise TransferFailed()
+        return url, code
+
+    def _wait_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> dict:
         for index in range(30):
             payload = self._get("/task", cookie, {"task_id": task_id, "retry_index": index})
             data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
             state = data.get("status")
             if state == 2:
-                return
+                return data
             message = data.get("message") if isinstance(data.get("message"), str) else ""
             if state not in {0, 1, None} or "同名" in message:
                 if "同名" in message:

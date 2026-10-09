@@ -316,7 +316,7 @@ class BaiduAdapter:
     def delete(self, cookie: str, path: str) -> None:
         self._manage(cookie, "delete", [path])
 
-    def create_share(self, cookie: str, fs_id: int, password: str, period: str = "0") -> str:
+    def create_share(self, cookie: str, fs_id: int, password: str, period: str = "0", path: str | None = None, name: str | None = None) -> str:
         cookie, bdstoken = self._token_for(cookie)
         created = self._post(
             SHARE_SET_URL,
