@@ -15,6 +15,9 @@ from app.services.baidu_login_sessions import LoginSessionStore
 from app.services.membership import account_limit
 from app.pans import LoginRejected, ProviderClosed, adapter_for
 from app.pans.baidu_login import QrLoginFailed, poll_qr, start_qr
+from app.pans.quark_login import QrLoginFailed as QuarkQrLoginFailed
+from app.pans.quark_login import poll_qr as poll_quark_qr
+from app.pans.quark_login import start_qr as start_quark_qr
 from app.schemas import AccountBindIn, AccountCookieIn, AccountOut, BaiduLoginOut, BaiduLoginStartIn
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
@@ -269,6 +272,123 @@ def confirm_baidu_login(
         account = PanAccount(
             user_id=user.id,
             provider="baidu",
+            nickname=item.nickname,
+            cookie_ciphertext=encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key),
+            status="valid",
+            created_at=now,
+            updated_at=now,
+        )
+        account = add_account(session, account)
+    else:
+        account.nickname = item.nickname
+        account.cookie_ciphertext = encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key)
+        account.status = "valid"
+        account.updated_at = now
+    session.commit()
+    session.refresh(account)
+    store.discard(session_id, user.id)
+    return to_account_out(account)
+
+
+def owned_provider(session: Session, user: User, account_id: int, provider: str) -> PanAccount:
+    account = get_for_user(session, user.id, account_id)
+    if account is None or account.provider != provider:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return account
+
+
+@router.post("/quark/login", status_code=201)
+def start_quark_login(
+    body: BaiduLoginStartIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    now: datetime = Depends(now_utc),
+) -> BaiduLoginOut:
+    account = None
+    if body.account_id is not None:
+        account = owned_provider(session, user, body.account_id, "quark")
+    ensure_slot(session, user, now, "quark", account)
+    try:
+        with pan_client(request) as client:
+            started = start_quark_qr(client)
+    except QuarkQrLoginFailed as exc:
+        raise HTTPException(status_code=502, detail="暂时无法打开夸克登录，请稍后再试") from exc
+    item = get_login_store(request).create(
+        user_id=user.id,
+        account_id=body.account_id,
+        sign=started.sign,
+        gid=started.gid,
+        image=started.image,
+        content_type=started.content_type,
+    )
+    return _login_out(item)
+
+
+@router.get("/quark/login/{session_id}/qrcode")
+def quark_login_qrcode(session_id: str, request: Request, user: User = Depends(get_current_user)) -> Response:
+    item = get_login_store(request).get(session_id, user.id)
+    if item is None or item.status == "expired":
+        raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
+    return Response(content=item.image, media_type=item.content_type)
+
+
+@router.get("/quark/login/{session_id}")
+def quark_login_status(session_id: str, request: Request, user: User = Depends(get_current_user)) -> BaiduLoginOut:
+    store = get_login_store(request)
+    item = store.get(session_id, user.id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
+    if item.status in {"ready", "expired"}:
+        return _login_out(item)
+    try:
+        with pan_client(request) as client:
+            polled = poll_quark_qr(client, item.sign)
+            if polled.state == "ready" and polled.cookie:
+                nickname = verified_nickname("quark", polled.cookie, client)
+                store.mark(item.id, user.id, "ready", cookie=polled.cookie, nickname=nickname)
+            elif polled.state == "scanned":
+                store.mark(item.id, user.id, "scanned")
+            elif polled.state == "expired":
+                store.mark(item.id, user.id, "expired")
+    except HTTPException:
+        raise
+    except QuarkQrLoginFailed as exc:
+        raise HTTPException(status_code=502, detail="暂时无法打开夸克登录，请稍后再试") from exc
+    current = store.get(session_id, user.id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
+    return _login_out(current)
+
+
+@router.delete("/quark/login/{session_id}")
+def cancel_quark_login(session_id: str, request: Request, user: User = Depends(get_current_user)) -> dict:
+    get_login_store(request).discard(session_id, user.id)
+    return {"ok": True}
+
+
+@router.post("/quark/login/{session_id}/confirm")
+def confirm_quark_login(
+    session_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    now: datetime = Depends(now_utc),
+) -> AccountOut:
+    store = get_login_store(request)
+    item = store.get(session_id, user.id)
+    if item is None or item.status == "expired":
+        raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
+    if item.status != "ready" or not item.cookie or not item.nickname:
+        raise HTTPException(status_code=422, detail="请先在手机上确认登录")
+    account = None
+    if item.account_id is not None:
+        account = owned_provider(session, user, item.account_id, "quark")
+    ensure_slot(session, user, now, "quark", account)
+    if account is None:
+        account = PanAccount(
+            user_id=user.id,
+            provider="quark",
             nickname=item.nickname,
             cookie_ciphertext=encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key),
             status="valid",
