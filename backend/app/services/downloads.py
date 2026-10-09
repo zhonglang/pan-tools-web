@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.services.folder_download import FolderTooLarge, archive_entries
 from app.services.local_folder import DownloadCancelled, download_root, write_entries
 from app.models import DownloadTask, PanAccount
-from app.pans.baidu import BaiduAdapter
+from app.pans import adapter_for
 from app.pans.errors import LoginRejected, PathNotFound, TransferFailed
 
 _lock = threading.Lock()
@@ -57,7 +57,10 @@ def cancel_save(session: Session, task: DownloadTask) -> DownloadTask:
 
 
 def _run_save(session_factory, client, task_id: int, account_id: int, cookie: str, target: str) -> None:
-    adapter = BaiduAdapter(client)
+    with session_factory() as session:
+        account = session.get(PanAccount, account_id)
+        provider = account.provider if account is not None else "baidu"
+    adapter = adapter_for(provider, client)
     try:
         if _stopped(task_id):
             _finish(session_factory, task_id, "cancelled")

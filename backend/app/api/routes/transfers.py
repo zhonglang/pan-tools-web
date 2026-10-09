@@ -318,7 +318,7 @@ def download_file(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     target = require_child_path(path)
     adapter, cookie = open_adapter(session, account, request)
     if folder:
@@ -334,7 +334,7 @@ def download_file(
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except TransferFailed as exc:
         raise HTTPException(status_code=422, detail="下载失败") from exc
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
@@ -362,7 +362,7 @@ def folder_download(adapter: BaiduAdapter, cookie: str, target: str, session: Se
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except TransferFailed as exc:
         raise HTTPException(status_code=422, detail="下载失败") from exc
     filename = quote(f"{target.rsplit('/', 1)[-1]}.zip")
@@ -404,7 +404,7 @@ def save_directory(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     target = require_child_path(body.path)
     _adapter, cookie = open_adapter(session, account, request)
     task = start_save(

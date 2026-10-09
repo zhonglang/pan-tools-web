@@ -91,6 +91,21 @@ def test_transfer_share_saves_top_level_files():
     assert saved["body"]["pwd_id"] == "abc"
 
 
+def test_open_download_streams_the_quark_file():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/file/download"):
+            assert request.headers["cookie"] == COOKIE
+            body = json.loads(request.read())
+            assert body["fids"] == ["file-1"]
+            return httpx.Response(200, json={"status": 200, "data": [{"download_url": "https://dl.example/a.bin"}]})
+        assert request.url.host == "dl.example"
+        return httpx.Response(200, content=b"hello", headers={"Content-Length": "5"})
+
+    stream = adapter_for("quark", client_for(handler)).open_download(COOKIE, "/file-1")
+    assert b"".join(stream) == b"hello"
+    assert stream.size == 5
+
+
 def test_list_share_records_keeps_missing_counts_empty():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/share/mypage/detail")

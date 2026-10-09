@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import httpx
 
-from app.pans.baidu import DirEntry
+from app.pans.baidu import DirEntry, DownloadStream
 from app.pans.errors import DuplicateName, InvalidLink, LoginRejected, PathNotFound, RateLimited, TransferFailed, WrongPassword
 
 BASE = "https://drive-pc.quark.cn/1/clouddrive"
@@ -210,6 +210,28 @@ class QuarkAdapter:
         if not isinstance(task_id, str) or not task_id:
             raise TransferFailed()
         self._wait_task(cookie, task_id, wait)
+
+    def open_download(self, cookie: str, path: str):
+        payload = self._post("/file/download", cookie, {"fids": [_fid(path)]})
+        data = payload.get("data")
+        first = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+        url = first.get("download_url")
+        if not isinstance(url, str) or not url:
+            raise TransferFailed()
+        try:
+            response = self.client.get(url, headers=self._headers(cookie), timeout=30)
+        except Exception as exc:
+            raise TransferFailed() from exc
+        if response.status_code != 200:
+            raise TransferFailed()
+        length = response.headers.get("content-length")
+        size = int(length) if isinstance(length, str) and length.isdecimal() else len(response.content)
+        body = response.content
+
+        def chunks():
+            yield body
+
+        return DownloadStream(chunks(), size)
 
     def list_share_records(self, cookie: str) -> list[dict]:
         records: list[dict] = []

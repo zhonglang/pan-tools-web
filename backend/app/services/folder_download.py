@@ -14,36 +14,32 @@ def archive_entries(adapter: BaiduAdapter, cookie: str, directory: str) -> list[
     base = "全部文件" if directory == "/" else directory.rstrip("/").rsplit("/", 1)[-1]
     planned: list[tuple[str, str | None, int]] = []
 
-    def zip_name(path: str, is_dir: bool) -> str:
-        if directory == "/":
-            relative = path.lstrip("/")
-        else:
-            prefix = directory.rstrip("/") + "/"
-            relative = path[len(prefix):] if path.startswith(prefix) else path.lstrip("/")
-        name = f"{base}/{relative}" if relative else base
+    def display(parts: list[str], is_dir: bool) -> str:
+        name = "/".join([base, *parts]) if parts else base
         if is_dir and not name.endswith("/"):
             name += "/"
         return name
 
-    def walk(path: str) -> None:
+    def walk(path: str, parts: list[str]) -> None:
         entries = adapter.list_dir(cookie, path)
         if not entries:
-            planned.append((zip_name(path, True), None, 0))
+            planned.append((display(parts, True), None, 0))
             return
-        folders: list[str] = []
+        folders: list[tuple[str, list[str]]] = []
         for entry in entries:
             if len(planned) >= MAX_ARCHIVE_FILES:
                 raise FolderTooLarge()
+            child = parts + [entry.name]
             if entry.is_dir:
-                folders.append(entry.path)
+                folders.append((entry.path, child))
                 continue
             if entry.size is None:
                 raise TransferFailed()
-            planned.append((zip_name(entry.path, False), entry.path, entry.size))
-        for folder in folders:
-            walk(folder)
+            planned.append((display(child, False), entry.path, entry.size))
+        for folder, child in folders:
+            walk(folder, child)
 
-    walk(directory)
+    walk(directory, [])
     return planned
 
 
