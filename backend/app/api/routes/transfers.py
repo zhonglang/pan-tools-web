@@ -19,6 +19,7 @@ from app.models import DownloadTask, Job, JobItem, PanAccount, User
 from app.services.links import canonical_input, parse_share_link, share_chunks
 from app.services.downloads import cancel_save, start_save
 from app.services.folder_download import FolderTooLarge, archive_body, archive_entries
+from app.pans import adapter_for
 from app.pans.baidu import BaiduAdapter
 from app.pans.errors import DuplicateName, LoginRejected, NotAFile, PathNotFound, TransferFailed
 from app.services.zip_stream import stored_zip_size
@@ -51,6 +52,10 @@ def pan_client(request: Request) -> httpx.Client:
     return client
 
 
+def relogin(provider: str) -> str:
+    return "请重新登录夸克" if provider == "quark" else "请重新登录百度"
+
+
 def owned_baidu(session: Session, user: User, account_id: int, *, allow_expired: bool = False) -> PanAccount:
     account = get_for_user(session, user.id, account_id)
     if account is None:
@@ -59,6 +64,17 @@ def owned_baidu(session: Session, user: User, account_id: int, *, allow_expired:
         raise HTTPException(status_code=422, detail="暂未开放")
     if account.status != "valid" and not allow_expired:
         raise HTTPException(status_code=422, detail="请重新登录百度")
+    return account
+
+
+def owned_drive(session: Session, user: User, account_id: int, *, allow_expired: bool = False) -> PanAccount:
+    account = get_for_user(session, user.id, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if account.provider not in {"baidu", "quark"}:
+        raise HTTPException(status_code=422, detail="暂未开放")
+    if account.status != "valid" and not allow_expired:
+        raise HTTPException(status_code=422, detail=relogin(account.provider))
     return account
 
 
@@ -101,14 +117,14 @@ def list_files(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     try:
         directory = normalize_directory(dir)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="目标目录无效") from exc
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
     try:
-        entries = BaiduAdapter(pan_client(request)).list_dir(cookie, directory)
+        entries = adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
         if account.status != "valid":
             account.status = "valid"
             account.updated_at = now_utc()
@@ -117,7 +133,7 @@ def list_files(
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except PathNotFound as exc:
         raise HTTPException(status_code=422, detail="目标目录不存在") from exc
     return [
@@ -150,15 +166,18 @@ def create_folder(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     try:
         directory = normalize_directory(body.directory)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="目标目录无效") from exc
     path = folder_path(directory, body.name)
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
-    adapter = BaiduAdapter(pan_client(request))
+    adapter = adapter_for(account.provider, pan_client(request))
     try:
+        if account.provider == "quark":
+            created = adapter.create_dir(cookie, directory, path.rsplit("/", 1)[-1])
+            return DirEntryOut(name=created.name, path=created.path, is_dir=True)
         warmed = adapter.prepare(cookie)
         remember_cookie(session, account, cookie, warmed)
         adapter.create_dir(warmed, path)
@@ -166,7 +185,7 @@ def create_folder(
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except DuplicateName as exc:
         raise HTTPException(status_code=422, detail="文件夹已存在") from exc
     except PathNotFound as exc:
@@ -193,9 +212,11 @@ def clean_name(name: str) -> str:
     return cleaned
 
 
-def open_adapter(session: Session, account: PanAccount, request: Request) -> tuple[BaiduAdapter, str]:
+def open_adapter(session: Session, account: PanAccount, request: Request):
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
-    adapter = BaiduAdapter(pan_client(request))
+    adapter = adapter_for(account.provider, pan_client(request))
+    if account.provider == "quark":
+        return adapter, cookie
     try:
         warmed = adapter.prepare(cookie)
     except LoginRejected as exc:
@@ -215,7 +236,7 @@ def rename_file(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     path = require_child_path(body.path)
     name = clean_name(body.name)
     adapter, cookie = open_adapter(session, account, request)
@@ -229,7 +250,7 @@ def rename_file(
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except TransferFailed as exc:
         raise HTTPException(status_code=422, detail="重命名失败") from exc
     return OkOut()
@@ -243,7 +264,7 @@ def delete_file(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     path = require_child_path(body.path)
     adapter, cookie = open_adapter(session, account, request)
     try:
@@ -254,7 +275,7 @@ def delete_file(
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except TransferFailed as exc:
         raise HTTPException(status_code=422, detail="删除失败") from exc
     return OkOut()
