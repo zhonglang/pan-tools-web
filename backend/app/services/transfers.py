@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.core.crypto import decrypt_cookie
 from app.services.links import parse_share_link
 from app.models import Job, JobItem, PanAccount
-from app.pans.baidu import BaiduAdapter
+from app.pans import adapter_for
 from app.pans.errors import (
     DuplicateName,
     InvalidLink,
@@ -54,8 +54,16 @@ def fail_remaining(items: list[JobItem], start: int, now: datetime) -> None:
             item.updated_at = now
 
 
+def _provider_error(provider: str) -> str:
+    if provider == "baidu":
+        return "请使用百度账号"
+    if provider == "quark":
+        return "请使用夸克账号"
+    return "暂未开放"
+
+
 def run_item(
-    adapter: BaiduAdapter,
+    adapter,
     item: JobItem,
     account: PanAccount,
     directory: str,
@@ -64,9 +72,9 @@ def run_item(
     now: datetime,
 ) -> str:
     parsed = parse_share_link(item.input_text)
-    if parsed is None or parsed.provider != "baidu":
+    if parsed is None or parsed.provider != account.provider:
         item.status = "failed"
-        item.error = "链接无法解析" if parsed is None else "暂未开放"
+        item.error = "链接无法解析" if parsed is None else _provider_error(parsed.provider)
         item.updated_at = now
         return "failed"
     while item.attempts < 3:
@@ -131,7 +139,7 @@ def execute_job(session: Session, client, job: Job, sleeper: Callable[[float], N
         finish_job(job, items, now)
         return
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
-    adapter = BaiduAdapter(client)
+    adapter = adapter_for(account.provider, client)
     for index, item in enumerate(items):
         if item.status != "pending":
             continue

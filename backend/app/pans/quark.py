@@ -1,7 +1,11 @@
+import re
+import time
+from collections.abc import Callable
+
 import httpx
 
 from app.pans.baidu import DirEntry
-from app.pans.errors import DuplicateName, LoginRejected, PathNotFound, TransferFailed
+from app.pans.errors import DuplicateName, InvalidLink, LoginRejected, PathNotFound, RateLimited, TransferFailed, WrongPassword
 
 BASE = "https://drive-pc.quark.cn/1/clouddrive"
 PARAMS = {"pr": "ucpro", "fr": "pc"}
@@ -41,7 +45,9 @@ class QuarkAdapter:
             merged.update(extra)
         return merged
 
-    def _payload(self, response: httpx.Response) -> dict:
+    def _payload(self, response: httpx.Response, *, invalid: bool = False) -> dict:
+        if response.status_code == 429:
+            raise RateLimited()
         try:
             payload = response.json()
         except Exception as exc:
@@ -52,13 +58,17 @@ class QuarkAdapter:
             return payload
         message = payload.get("message")
         text = message if isinstance(message, str) and message else "夸克请求失败"
+        if "提取码" in text:
+            raise WrongPassword()
         if "未登录" in text or payload.get("status") in {401, 403}:
             raise LoginRejected()
         if "同名" in text:
             raise DuplicateName()
+        if invalid:
+            raise InvalidLink()
         raise TransferFailed()
 
-    def _get(self, path: str, cookie: str, params: dict) -> dict:
+    def _get(self, path: str, cookie: str, params: dict, *, invalid: bool = False) -> dict:
         try:
             response = self.client.get(
                 f"{BASE}{path}",
@@ -68,9 +78,9 @@ class QuarkAdapter:
             )
         except Exception as exc:
             raise TransferFailed() from exc
-        return self._payload(response)
+        return self._payload(response, invalid=invalid)
 
-    def _post(self, path: str, cookie: str, body: dict) -> dict:
+    def _post(self, path: str, cookie: str, body: dict, *, invalid: bool = False) -> dict:
         try:
             response = self.client.post(
                 f"{BASE}{path}",
@@ -81,7 +91,7 @@ class QuarkAdapter:
             )
         except Exception as exc:
             raise TransferFailed() from exc
-        return self._payload(response)
+        return self._payload(response, invalid=invalid)
 
     def list_dir(self, cookie: str, directory: str) -> list[DirEntry]:
         parent = _fid(directory)
@@ -139,6 +149,87 @@ class QuarkAdapter:
 
     def delete(self, cookie: str, path: str) -> None:
         self._post("/file/delete", cookie, {"action_type": 2, "filelist": [_fid(path)], "exclude_fids": []})
+
+    def transfer_share(
+        self,
+        cookie: str,
+        surl: str,
+        password: str | None,
+        directory: str,
+        *,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        wait = sleeper or time.sleep
+        pwd_id = _pwd_id(surl)
+        token = self._post(
+            "/share/sharepage/token",
+            cookie,
+            {"pwd_id": pwd_id, "passcode": password or ""},
+            invalid=True,
+        )
+        data = token.get("data") if isinstance(token.get("data"), dict) else {}
+        stoken = data.get("stoken")
+        if not isinstance(stoken, str) or not stoken:
+            raise InvalidLink()
+        detail = self._get(
+            "/share/sharepage/detail",
+            cookie,
+            {"pwd_id": pwd_id, "stoken": stoken, "pdir_fid": "0", "_page": 1, "_size": 50},
+            invalid=True,
+        )
+        listed = detail.get("data") if isinstance(detail.get("data"), dict) else {}
+        files = listed.get("list") or []
+        fids = []
+        tokens = []
+        if isinstance(files, list):
+            for item in files:
+                if not isinstance(item, dict):
+                    continue
+                fid = item.get("fid")
+                share_token = item.get("share_fid_token")
+                if isinstance(fid, str) and fid and isinstance(share_token, str) and share_token:
+                    fids.append(fid)
+                    tokens.append(share_token)
+        if not fids:
+            raise InvalidLink()
+        saved = self._post(
+            "/share/sharepage/save",
+            cookie,
+            {
+                "fid_list": fids,
+                "fid_token_list": tokens,
+                "to_pdir_fid": _fid(directory),
+                "pwd_id": pwd_id,
+                "stoken": stoken,
+                "pdir_fid": "0",
+                "scene": "link",
+            },
+        )
+        task_data = saved.get("data") if isinstance(saved.get("data"), dict) else {}
+        task_id = task_data.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise TransferFailed()
+        self._wait_task(cookie, task_id, wait)
+
+    def _wait_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> None:
+        for index in range(30):
+            payload = self._get("/task", cookie, {"task_id": task_id, "retry_index": index})
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            state = data.get("status")
+            if state == 2:
+                return
+            message = data.get("message") if isinstance(data.get("message"), str) else ""
+            if state not in {0, 1, None} or "同名" in message:
+                if "同名" in message:
+                    raise DuplicateName()
+                raise TransferFailed()
+            sleeper(1)
+        raise TransferFailed()
+
+
+def _pwd_id(value: str) -> str:
+    matched = re.search(r"pan\.quark\.cn/s/([0-9A-Za-z]+)", value)
+    return matched.group(1) if matched is not None else value
 
 
 def _fid(directory: str) -> str:

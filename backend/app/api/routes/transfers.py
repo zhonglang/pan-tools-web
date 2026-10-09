@@ -436,7 +436,7 @@ def create_transfer(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ):
-    account = owned_baidu(session, user, body.account_id)
+    account = owned_drive(session, user, body.account_id)
     try:
         directory = normalize_directory(body.directory)
     except ValueError as exc:
@@ -448,12 +448,12 @@ def create_transfer(
     if directory != "/":
         cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
         try:
-            BaiduAdapter(pan_client(request)).list_dir(cookie, directory)
+            adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
         except LoginRejected as exc:
             account.status = "expired"
             account.updated_at = moment
             session.commit()
-            raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+            raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
         except PathNotFound as exc:
             raise HTTPException(status_code=422, detail="目标目录不存在") from exc
     try:
@@ -476,8 +476,8 @@ def create_transfer(
         parsed = parse_share_link(line)
         if parsed is None:
             status, error = "failed", "链接无法解析"
-        elif parsed.provider != "baidu":
-            status, error = "failed", "暂未开放"
+        elif parsed.provider != account.provider:
+            status, error = "failed", "请使用百度账号" if parsed.provider == "baidu" else "请使用夸克账号" if parsed.provider == "quark" else "暂未开放"
         else:
             status, error = "pending", None
         item = JobItem(
