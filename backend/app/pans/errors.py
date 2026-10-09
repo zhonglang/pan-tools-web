@@ -29,3 +29,7 @@ class RateLimited(Exception):
 
 class TransferFailed(Exception):
     pass
+
+
+class NotAFile(Exception):
+    pass

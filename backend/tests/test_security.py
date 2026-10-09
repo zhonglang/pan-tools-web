@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import pytest
 
-from app.security import (
+from app.core.security import (
     create_access_token,
     decode_access_token,
     hash_password,

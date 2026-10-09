@@ -11,6 +11,7 @@ export default function LoginPage({ onAuthenticated }: LoginPageProps) {
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -22,7 +23,7 @@ export default function LoginPage({ onAuthenticated }: LoginPageProps) {
     try {
       const user = await api.login(email, password);
       onAuthenticated(user);
-      navigate(user.role === "admin" ? "/admin/users" : "/");
+      navigate("/accounts");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "登录失败");
     } finally {
@@ -31,44 +32,42 @@ export default function LoginPage({ onAuthenticated }: LoginPageProps) {
   }
 
   return (
-    <AuthFrame title="欢迎回来" subtitle="使用邮箱进入工作台。管理员会直接进入会员管理。">
+    <AuthFrame title="欢迎回来" subtitle="用邮箱进入。登录后先看到网盘账号。">
       <form className="space-y-4" onSubmit={onSubmit}>
-        <label className="block text-sm font-medium text-ink">
+        <label className="block text-[13px] font-medium text-ink/80">
           邮箱
-          <input
-            name="email"
-            type="email"
-            required
-            autoComplete="email"
-            placeholder="you@example.com"
-            className="mt-2 w-full rounded-2xl border border-line bg-canvas px-4 py-3 text-sm outline-none transition duration-200 placeholder:text-ink/35 focus:border-primary focus:bg-white"
-          />
+          <input name="email" type="email" required autoComplete="email" placeholder="you@example.com" className="field" />
         </label>
-        <label className="block text-sm font-medium text-ink">
+        <label className="block text-[13px] font-medium text-ink/80">
           密码
-          <input
-            name="password"
-            type="password"
-            required
-            minLength={8}
-            autoComplete="current-password"
-            placeholder="至少 8 位"
-            className="mt-2 w-full rounded-2xl border border-line bg-canvas px-4 py-3 text-sm outline-none transition duration-200 placeholder:text-ink/35 focus:border-primary focus:bg-white"
-          />
+          <span className="relative mt-2 block">
+            <input
+              name="password"
+              type={showPassword ? "text" : "password"}
+              required
+              minLength={8}
+              autoComplete="current-password"
+              placeholder="至少 8 位"
+              className="field mt-0 pr-14"
+            />
+            <button
+              type="button"
+              className="absolute top-1/2 right-3 -translate-y-1/2 text-[12px] text-ink/45 hover:text-ink"
+              onClick={() => setShowPassword((value) => !value)}
+            >
+              {showPassword ? "隐藏" : "显示"}
+            </button>
+          </span>
         </label>
-        {error ? <p className="rounded-2xl bg-red-50 px-4 py-3 text-sm text-danger">{error}</p> : null}
-        <button
-          type="submit"
-          disabled={pending}
-          className="w-full rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-white transition duration-200 hover:bg-orange-700 disabled:cursor-wait disabled:opacity-70"
-        >
-          {pending ? "正在登录" : "进入工作台"}
+        {error ? <p className="alert">{error}</p> : null}
+        <button type="submit" disabled={pending} className="btn btn-primary w-full">
+          {pending ? "登录中" : "登录"}
         </button>
       </form>
-      <p className="mt-6 text-sm text-ink/65">
-        还没有账号？{" "}
-        <Link to="/register" className="font-semibold text-primary-dark hover:text-primary">
-          创建账号
+      <p className="mt-6 text-center text-sm text-ink/55">
+        没有账号？{" "}
+        <Link to="/register" className="font-bold text-primary-dark hover:text-primary">
+          注册
         </Link>
       </p>
     </AuthFrame>

@@ -2,12 +2,17 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { api, type User } from "./api";
 import AppShell from "./components/AppShell";
+import BrandMark from "./components/BrandMark";
 import AccountsPage from "./pages/AccountsPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
-import HomePage from "./pages/HomePage";
+import DownloadsPage from "./pages/DownloadsPage";
 import JobPage from "./pages/JobPage";
+import JobsPage from "./pages/JobsPage";
 import LoginPage from "./pages/LoginPage";
+import ProfilePage from "./pages/ProfilePage";
 import RegisterPage from "./pages/RegisterPage";
+import SharePage from "./pages/SharePage";
+import StatsPage from "./pages/StatsPage";
 import TransferPage from "./pages/TransferPage";
 
 export default function App() {
@@ -35,7 +40,12 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="grid min-h-screen place-items-center bg-canvas text-sm text-ink/60">正在确认登录状态</div>
+      <div className="grid min-h-dvh place-items-center bg-canvas">
+        <div className="flex flex-col items-center gap-4 text-ink/45">
+          <BrandMark />
+          <p className="text-sm">正在确认登录状态</p>
+        </div>
+      </div>
     );
   }
 
@@ -68,6 +78,54 @@ export default function App() {
         }
       />
       <Route
+        path="/share"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <SharePage user={user} />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/stats"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <StatsPage user={user} />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/downloads"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <DownloadsPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/jobs"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <JobsPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
         path="/jobs/:id"
         element={
           user ? (
@@ -92,17 +150,18 @@ export default function App() {
         }
       />
       <Route
-        path="/"
+        path="/profile"
         element={
           user ? (
             <AppShell user={user} onLogout={onLogout}>
-              <HomePage user={user} />
+              <ProfilePage user={user} />
             </AppShell>
           ) : (
-            <HomePage user={null} />
+            <Navigate to="/login" />
           )
         }
       />
+      <Route path="/" element={<Navigate to={user ? "/accounts" : "/login"} replace />} />
     </Routes>
   );
 }

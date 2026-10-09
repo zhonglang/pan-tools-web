@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.db import Base
+from app.core.database import Base
 from app.models import PanAccount, User
 
 

@@ -1,6 +1,6 @@
 import pytest
 
-from app.crypto import decrypt_cookie, encrypt_cookie
+from app.core.crypto import decrypt_cookie, encrypt_cookie
 
 KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 COOKIE = "BDUSS=super-secret-cookie-value"

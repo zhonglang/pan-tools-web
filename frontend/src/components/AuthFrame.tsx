@@ -1,7 +1,44 @@
 import type { ReactNode } from "react";
 import BrandMark from "./BrandMark";
 
-const points = ["免费与付费等级分开，到期后自动回到免费", "账号由你自己绑定，到期后再重新提交", "转存、分享和数据会放在同一套工作台里"];
+const points = [
+  { title: "扫码绑定", text: "用网盘 App 确认，账号只留在你这边。" },
+  { title: "批量转存", text: "分享链接直接收进指定目录。" },
+  { title: "任务可回看", text: "转存、分享和下载进度都在一处。" },
+];
+
+export function CoverLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-h-dvh bg-canvas lg:grid lg:grid-cols-[minmax(320px,0.86fr)_minmax(440px,1.14fr)]">
+      <aside className="relative hidden min-h-dvh flex-col justify-between overflow-hidden bg-primary px-12 py-12 text-white lg:flex xl:px-16">
+        <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-white/10" />
+        <div className="pointer-events-none absolute -bottom-20 -left-10 h-48 w-48 rounded-full bg-[#14b8a6]" />
+        <div className="relative">
+          <BrandMark light />
+        </div>
+        <div className="relative max-w-md">
+          <p className="text-sm font-semibold text-white/80">给个人用的网盘工具</p>
+          <p className="mt-3 text-[2.75rem] font-extrabold leading-[1.15] tracking-[-0.04em]">
+            把转存和分享
+            <br />
+            放在同一处。
+          </p>
+        </div>
+        <ul className="relative space-y-3">
+          {points.map((point) => (
+            <li key={point.title} className="rounded-2xl bg-white/15 px-4 py-3">
+              <p className="text-sm font-bold">{point.title}</p>
+              <p className="mt-1 text-[13px] leading-5 text-white/75">{point.text}</p>
+            </li>
+          ))}
+        </ul>
+      </aside>
+      <main className="flex min-h-dvh items-center justify-center px-6 py-12 sm:px-10">
+        <div className="w-full max-w-[400px]">{children}</div>
+      </main>
+    </div>
+  );
+}
 
 export default function AuthFrame({
   title,
@@ -13,37 +50,13 @@ export default function AuthFrame({
   children: ReactNode;
 }) {
   return (
-    <div className="min-h-screen bg-canvas lg:grid lg:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
-      <aside className="relative hidden overflow-hidden bg-ink text-white lg:flex lg:flex-col lg:justify-between lg:px-14 lg:py-12">
-        <div className="pointer-events-none absolute -right-24 top-16 h-72 w-72 rounded-full bg-primary/30 blur-3xl" />
-        <div className="pointer-events-none absolute bottom-0 left-0 h-64 w-64 rounded-full bg-accent/20 blur-3xl" />
-        <BrandMark light />
-        <div className="relative max-w-md">
-          <p className="text-sm font-medium text-teal-100">给个人用户的网盘工作台</p>
-          <h1 className="mt-4 max-w-md text-balance text-4xl font-semibold leading-snug tracking-tight">把转存、分享和会员放在一处。</h1>
-          <ul className="mt-8 space-y-4 text-sm leading-6 text-white/80">
-            {points.map((point) => (
-              <li key={point} className="flex gap-3">
-                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                <span>{point}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <p className="relative text-xs text-white/50">当前开放登录、注册和会员管理。网盘能力按阶段接入。</p>
-      </aside>
-      <main className="flex min-h-screen items-center justify-center px-5 py-10">
-        <div className="w-full max-w-md">
-          <div className="mb-8 lg:hidden">
-            <BrandMark />
-          </div>
-          <div className="rounded-[28px] border border-line bg-white px-7 py-8 shadow-[0_20px_50px_rgba(19,78,74,0.08)]">
-            <h2 className="text-2xl font-semibold tracking-tight text-ink">{title}</h2>
-            <p className="mt-2 text-sm leading-6 text-ink/65">{subtitle}</p>
-            <div className="mt-7">{children}</div>
-          </div>
-        </div>
-      </main>
-    </div>
+    <CoverLayout>
+      <div className="mb-8 lg:hidden">
+        <BrandMark />
+      </div>
+      <h1 className="text-[2rem] font-extrabold tracking-[-0.04em] text-ink">{title}</h1>
+      <p className="mt-2 text-sm leading-6 text-ink/65">{subtitle}</p>
+      <div className="mt-8">{children}</div>
+    </CoverLayout>
   );
 }

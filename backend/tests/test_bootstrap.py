@@ -4,9 +4,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.bootstrap import ensure_admin
-from app.config import Settings
-from app.db import Base
+from app.services.bootstrap import ensure_admin
+from app.core.config import Settings
+from app.core.database import Base
 from app.models import User
 
 

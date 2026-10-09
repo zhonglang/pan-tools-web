@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, type User } from "../api";
+import PageHeader from "../components/PageHeader";
+import TableLoading from "../components/TableLoading";
+import TablePager, { PAGE_SIZE, pageOf } from "../components/TablePager";
 
 function formatExpiry(value: string | null) {
   if (!value) return "—";
@@ -27,13 +30,19 @@ export default function AdminUsersPage() {
   const [expiry, setExpiry] = useState<Record<number, string>>({});
   const [error, setError] = useState("");
   const [pendingId, setPendingId] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
+  const [loaded, setLoaded] = useState(false);
+  const paged = pageOf(users, page, pageSize);
 
   async function load() {
     setUsers(await api.users());
   }
 
   useEffect(() => {
-    load().catch((caught: Error) => setError(caught.message));
+    load()
+      .catch((caught: Error) => setError(caught.message))
+      .finally(() => setLoaded(true));
   }, []);
 
   async function save(user: User, plan: "free" | "paid") {
@@ -51,20 +60,17 @@ export default function AdminUsersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-primary-dark">管理</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight">会员</h1>
-          <p className="mt-2 text-sm text-ink/65">开通付费时必须填写到期时间。改回免费会清掉到期时间。</p>
-        </div>
-        <p className="text-sm text-ink/55">{users.length} 个账号</p>
-      </div>
-      {error ? <p className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-danger">{error}</p> : null}
-      <div className="mt-6 overflow-hidden rounded-3xl border border-line bg-white">
+    <div>
+      <PageHeader
+        title="会员"
+        description="开通付费时必须填写到期时间。改回免费会清掉到期时间。"
+        extra={<p className="text-sm text-ink/50">{users.length} 个账号</p>}
+      />
+      {error ? <p className="alert mb-4">{error}</p> : null}
+      <div className="overflow-hidden rounded-2xl border border-line bg-white">
         <div className="overflow-x-auto">
           <table className="min-w-[860px] w-full text-left text-sm">
-            <thead className="bg-canvas text-xs uppercase tracking-wide text-ink/50">
+            <thead className="bg-canvas text-[12px] text-ink/50">
               <tr>
                 <th className="px-5 py-4 font-medium">账号</th>
                 <th className="px-5 py-4 font-medium">角色</th>
@@ -74,7 +80,8 @@ export default function AdminUsersPage() {
               </tr>
             </thead>
             <tbody>
-              {users.map((user) => (
+              {!loaded ? <TableLoading colSpan={5} /> : null}
+              {paged.rows.map((user) => (
                 <tr key={user.id} className="border-t border-line">
                   <td className="px-5 py-4">
                     <div className="font-medium">{user.email}</div>
@@ -97,13 +104,13 @@ export default function AdminUsersPage() {
                         aria-label={`${user.email} 的到期时间`}
                         value={expiry[user.id] ?? ""}
                         onChange={(event) => setExpiry({ ...expiry, [user.id]: event.target.value })}
-                        className="rounded-xl border border-line bg-canvas px-3 py-2 text-xs"
+                        className="h-9 rounded-lg border border-line bg-white px-3 text-xs"
                       />
                       <button
                         type="button"
                         disabled={pendingId === user.id}
                         onClick={() => save(user, "paid")}
-                        className="rounded-full bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary-dark disabled:opacity-60"
+                        className="h-9 rounded-lg bg-accent px-3 text-xs font-bold text-white hover:bg-[#c2410c] disabled:opacity-60"
                       >
                         开通付费
                       </button>
@@ -111,7 +118,7 @@ export default function AdminUsersPage() {
                         type="button"
                         disabled={pendingId === user.id}
                         onClick={() => save(user, "free")}
-                        className="rounded-full border border-line px-3 py-2 text-xs font-semibold text-ink hover:border-ink"
+                        className="h-9 rounded-lg border border-line bg-white px-3 text-xs font-semibold text-ink hover:bg-canvas"
                       >
                         改回免费
                       </button>
@@ -122,6 +129,16 @@ export default function AdminUsersPage() {
             </tbody>
           </table>
         </div>
+        <TablePager
+          page={paged.page}
+          total={users.length}
+          pageSize={pageSize}
+          onPage={setPage}
+          onPageSize={(size) => {
+            setPageSize(size);
+            setPage(1);
+          }}
+        />
       </div>
     </div>
   );

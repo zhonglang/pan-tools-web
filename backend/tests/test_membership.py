@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.membership import baidu_account_limit, can_use_paid_features, effective_plan
+from app.services.membership import baidu_account_limit, can_use_paid_features, effective_plan
 from app.models import User
 
 

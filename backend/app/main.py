@@ -1,11 +1,22 @@
+import os
+import sys
+from pathlib import Path
+
+if __name__ == "__main__":
+    ROOT = Path(__file__).resolve().parent.parent
+    os.chdir(ROOT)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.bootstrap import ensure_admin
-from app.config import get_settings
-from app.db import Base, make_engine, make_session_factory
-from app.routers import accounts, admin, auth, transfers
+from app.services.bootstrap import ensure_admin
+from app.core.config import get_settings
+from app.core.database import Base, make_engine, make_session_factory
+from app.services.downloads import interrupt_orphans
+from app.api.routes import accounts, admin, auth, shares, stats, transfers
 
 
 @asynccontextmanager
@@ -17,6 +28,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(engine)
     with app.state.session_factory() as session:
         ensure_admin(session, app.state.settings)
+        interrupt_orphans(session)
     yield
     client = getattr(app.state, "pan_http_client", None)
     if client is not None:
@@ -32,4 +44,18 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(accounts.router)
     app.include_router(transfers.router)
+    app.include_router(shares.router)
+    app.include_router(stats.router)
     return app
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:create_app",
+        factory=True,
+        host="127.0.0.1",
+        port=8010,
+        reload=True,
+    )

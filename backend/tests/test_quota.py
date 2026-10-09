@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import DailyUsage, User
-from app.quota import QuotaRejected, reserve_transfers, shanghai_today
+from app.services.quota import QuotaRejected, reserve_transfers, shanghai_today
 
 SHANGHAI_NOON = datetime(2026, 9, 22, 4, 0, tzinfo=timezone.utc)  # 上海 12:00
 
