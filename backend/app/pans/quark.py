@@ -211,6 +211,21 @@ class QuarkAdapter:
             raise TransferFailed()
         self._wait_task(cookie, task_id, wait)
 
+    def list_share_records(self, cookie: str) -> list[dict]:
+        records: list[dict] = []
+        for page in range(1, 101):
+            payload = self._get("/share/mypage/detail", cookie, {"_page": page, "_size": 50})
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            batch = data.get("list") or []
+            if not isinstance(batch, list):
+                raise TransferFailed()
+            for item in batch:
+                if isinstance(item, dict):
+                    records.append(_share_record(item))
+            if len(batch) < 50:
+                return records
+        raise TransferFailed()
+
     def create_share(
         self,
         cookie: str,
@@ -267,6 +282,39 @@ class QuarkAdapter:
                 raise TransferFailed()
             sleeper(1)
         raise TransferFailed()
+
+
+def _optional_count(item: dict, key: str) -> int | None:
+    if key not in item or isinstance(item.get(key), bool):
+        return None
+    value = item.get(key)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _share_record(item: dict) -> dict:
+    share_id = item.get("share_id")
+    pwd_id = item.get("pwd_id") if isinstance(item.get("pwd_id"), str) else ""
+    url = item.get("share_url") if isinstance(item.get("share_url"), str) else ""
+    if not url and pwd_id:
+        url = f"https://pan.quark.cn/s/{pwd_id}"
+    title = item.get("title") if isinstance(item.get("title"), str) else item.get("file_name")
+    expired_at = item.get("expired_at")
+    created_at = item.get("created_at")
+    record = {
+        "shareId": str(share_id) if share_id is not None else "",
+        "url": url,
+        "title": title if isinstance(title, str) else "",
+        "views": _optional_count(item, "click_pv"),
+        "transfers": _optional_count(item, "save_pv"),
+        "downloads": _optional_count(item, "download_pv"),
+    }
+    if isinstance(created_at, int):
+        record["ctime"] = created_at // 1000 if created_at >= 10**12 else created_at
+    if isinstance(expired_at, int) and expired_at > 0:
+        record["expiredTime"] = expired_at // 1000 if expired_at >= 10**12 else expired_at
+    return record
 
 
 def _pwd_id(value: str) -> str:

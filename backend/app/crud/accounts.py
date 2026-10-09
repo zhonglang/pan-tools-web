@@ -18,6 +18,16 @@ def list_baidu(session: Session, user_id: int) -> list[PanAccount]:
     )
 
 
+def list_drives(session: Session, user_id: int) -> list[PanAccount]:
+    return list(
+        session.scalars(
+            select(PanAccount)
+            .where(PanAccount.user_id == user_id, PanAccount.provider.in_(("baidu", "quark")))
+            .order_by(PanAccount.id)
+        ).all()
+    )
+
+
 def count_valid(session: Session, user_id: int, provider: str) -> int:
     count = session.scalar(
         select(func.count())

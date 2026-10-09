@@ -1,13 +1,14 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
 
 from app.core.crypto import encrypt_cookie
-from app.models import Job, JobItem, PanAccount, User
+from app.models import Job, JobItem, PanAccount, ShareLink, ShareStatSnapshot, User
 from app.pans import adapter_for
 from app.pans.errors import WrongPassword
+from app.services.stats import enqueue_daily_syncs, execute_sync
 from app.services.transfers import execute_job
 
 COOKIE = "b-user-id=1"
@@ -88,6 +89,21 @@ def test_transfer_share_saves_top_level_files():
     assert saved["body"]["to_pdir_fid"] == "folder-1"
     assert saved["body"]["fid_list"] == ["fid-1"]
     assert saved["body"]["pwd_id"] == "abc"
+
+
+def test_list_share_records_keeps_missing_counts_empty():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/share/mypage/detail")
+        return httpx.Response(
+            200,
+            json={"status": 200, "data": {"list": [{"share_id": "s1", "pwd_id": "abc", "title": "电影"}]}},
+        )
+
+    records = adapter_for("quark", client_for(handler)).list_share_records(COOKIE)
+    assert records[0]["views"] is None
+    assert records[0]["transfers"] is None
+    assert records[0]["downloads"] is None
+    assert records[0]["url"].startswith("https://pan.quark.cn/s/")
 
 
 def test_quark_create_share_returns_url_and_password():
@@ -192,3 +208,90 @@ def test_quark_login_rejected_marks_account_expired(client):
         items = session.scalars(select(JobItem).where(JobItem.job_id == job_id).order_by(JobItem.id)).all()
         assert account.status == "expired"
         assert [item.error for item in items] == ["登录已失效，请重新登录", "登录已失效，请重新登录"]
+
+
+def test_daily_sync_includes_valid_quark_account(client):
+    response = client.post("/api/auth/register", json={"email": "quark-sync@example.com", "password": "password-123"})
+    assert response.status_code == 201
+    with client.app.state.session_factory() as session:
+        user = session.scalars(select(User).where(User.email == "quark-sync@example.com")).one()
+        user.plan = "paid"
+        user.plan_expires_at = NOW + timedelta(days=30)
+        account = PanAccount(
+            user_id=user.id,
+            provider="quark",
+            nickname="夸克",
+            cookie_ciphertext=encrypt_cookie(COOKIE, KEY),
+            status="valid",
+        )
+        session.add(account)
+        session.commit()
+        account_id = account.id
+        enqueue_daily_syncs(session, datetime(2026, 9, 22, 16, 5, tzinfo=timezone.utc))
+        session.commit()
+        jobs = session.scalars(select(Job).where(Job.account_id == account_id, Job.type == "sync")).all()
+        assert len(jobs) == 1
+
+
+def test_quark_sync_writes_nothing_when_a_later_page_fails(client):
+    response = client.post("/api/auth/register", json={"email": "quark-fail@example.com", "password": "password-123"})
+    assert response.status_code == 201
+    with client.app.state.session_factory() as session:
+        user = session.scalars(select(User).where(User.email == "quark-fail@example.com")).one()
+        account = PanAccount(
+            user_id=user.id,
+            provider="quark",
+            nickname="夸克",
+            cookie_ciphertext=encrypt_cookie(COOKIE, KEY),
+            status="valid",
+        )
+        session.add(account)
+        session.flush()
+        share = ShareLink(
+            user_id=user.id,
+            account_id=account.id,
+            baidu_share_id="old",
+            name="旧分享",
+            path="/旧分享",
+            url="https://pan.quark.cn/s/old",
+            status="active",
+            created_at=NOW,
+        )
+        session.add(share)
+        session.flush()
+        session.add(
+            ShareStatSnapshot(
+                share_link_id=share.id,
+                account_id=account.id,
+                transfer_count=1,
+                view_count=1,
+                download_count=0,
+                taken_at=NOW,
+            )
+        )
+        job = Job(
+            user_id=user.id,
+            account_id=account.id,
+            type="sync",
+            status="pending",
+            directory="/",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        session.add(job)
+        session.commit()
+        share_id, job_id = share.id, job.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["_page"])
+        if page == 1:
+            return httpx.Response(200, json={"status": 200, "data": {"list": [{"share_id": "s1", "pwd_id": "abc"}] * 50}})
+        return httpx.Response(500, json={"status": 500, "message": "失败"})
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    with client.app.state.session_factory() as session:
+        execute_sync(session, client.app.state.pan_http_client, session.get(Job, job_id), lambda _seconds: None, NOW)
+        session.commit()
+        assert session.get(Job, job_id).status == "failed"
+        assert session.get(ShareLink, share_id).name == "旧分享"
+        assert len(session.scalars(select(ShareStatSnapshot)).all()) == 1

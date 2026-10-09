@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.core.crypto import decrypt_cookie
 from app.services.membership import can_use_paid_features
 from app.models import Job, PanAccount, ShareLink, ShareStatSnapshot, User
-from app.pans.baidu import BaiduAdapter
+from app.pans import adapter_for
 from app.pans.errors import LoginRejected, RateLimited, TransferFailed
 from app.services.transfers import EXPIRED, RETRY_DELAYS
 
@@ -57,7 +57,9 @@ def enqueue_daily_syncs(session: Session, now: datetime) -> None:
     if local.hour > 5 or (local.hour, local.minute) < (0, 5):
         return
     day_start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-    accounts = session.scalars(select(PanAccount).where(PanAccount.provider == "baidu", PanAccount.status == "valid")).all()
+    accounts = session.scalars(
+        select(PanAccount).where(PanAccount.provider.in_(("baidu", "quark")), PanAccount.status == "valid")
+    ).all()
     for account in accounts:
         user = session.get(User, account.user_id)
         if user is None or not can_use_paid_features(user, current):
@@ -95,7 +97,7 @@ def execute_sync(session: Session, client, job: Job, sleeper, now: datetime) -> 
         job.updated_at = now
         return
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
-    adapter = BaiduAdapter(client)
+    adapter = adapter_for(account.provider, client)
     records = None
     for attempt in range(3):
         try:
@@ -509,15 +511,21 @@ def _delta(shots: list[ShareStatSnapshot], start: datetime, end: datetime, lates
 
 
 def _record(item: dict, now: datetime) -> dict | None:
-    share_id = item.get("shareId")
-    if isinstance(share_id, str) and share_id.isdecimal():
-        share_id = int(share_id)
-    if not isinstance(share_id, int):
+    raw = item.get("shareId")
+    if isinstance(raw, str) and raw.isdecimal():
+        raw = int(raw)
+    if isinstance(raw, int):
+        share_id = str(raw)
+    elif isinstance(raw, str) and raw.strip():
+        share_id = raw.strip()
+    else:
         return None
     short = item.get("shorturl") if isinstance(item.get("shorturl"), str) else ""
     path = item.get("typicalPath") if isinstance(item.get("typicalPath"), str) else ""
-    name = path.rstrip("/").rsplit("/", 1)[-1] if path else short or str(share_id)
-    url = f"https://pan.baidu.com/s/{short}" if short else ""
+    title = item.get("title") if isinstance(item.get("title"), str) else ""
+    name = title or (path.rstrip("/").rsplit("/", 1)[-1] if path else short or share_id)
+    given = item.get("url") if isinstance(item.get("url"), str) else ""
+    url = given or (f"https://pan.baidu.com/s/{short}" if short else "")
     created = item.get("ctime")
     created_at = datetime.fromtimestamp(created, timezone.utc) if isinstance(created, int) else now
     expired_time = item.get("expiredTime")
@@ -529,17 +537,23 @@ def _record(item: dict, now: datetime) -> dict | None:
         if short.startswith("1") and len(short) > 1:
             keys.add(short[1:])
     return {
-        "share_id": str(share_id),
+        "share_id": share_id,
         "keys": keys,
         "name": name[:255],
         "path": path[:1024],
         "url": url,
         "created_at": created_at,
         "expired": expired,
-        "views": _count(item.get("vCnt")),
-        "transfers": _count(item.get("tCnt")),
-        "downloads": _count(item.get("dCnt")),
+        "views": _metric(item, "views", "vCnt"),
+        "transfers": _metric(item, "transfers", "tCnt"),
+        "downloads": _metric(item, "downloads", "dCnt"),
     }
+
+
+def _metric(item: dict, key: str, fallback: str) -> int | None:
+    if key in item:
+        return _count(item.get(key))
+    return _count(item.get(fallback))
 
 
 def _count(value: object) -> int | None:

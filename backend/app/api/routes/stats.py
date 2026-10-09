@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.routes.transfers import owned_baidu, to_job
+from app.api.routes.transfers import owned_drive, to_job
 from app.core.deps import get_current_user, get_db, now_utc
-from app.crud.accounts import list_baidu
+from app.crud.accounts import list_drives
 from app.crud.jobs import add as add_job
 from app.crud.jobs import items_for, running_sync
 from app.models import Job, User
@@ -35,7 +35,7 @@ def create_sync(
 ):
     del request
     _paid(user)
-    account = owned_baidu(session, user, account_id)
+    account = owned_drive(session, user, account_id)
     running = running_sync(session, account.id)
     if running is not None:
         return to_job(running, items_for(session, running.id))
@@ -65,7 +65,7 @@ def account_stats(
     session: Session = Depends(get_db),
 ):
     _paid(user)
-    account = owned_baidu(session, user, account_id, allow_expired=True)
+    account = owned_drive(session, user, account_id, allow_expired=True)
     if span not in {"today", "week", "month"} or rank not in {"history", "range"}:
         raise HTTPException(status_code=422, detail="查询条件无效")
     moment = now_utc()
@@ -88,9 +88,9 @@ def user_stats(
     _paid(user)
     if rank not in {"history", "range"}:
         raise HTTPException(status_code=422, detail="查询条件无效")
-    accounts = list_baidu(session, user.id)
+    accounts = list_drives(session, user.id)
     if account_id is not None:
-        accounts = [owned_baidu(session, user, account_id, allow_expired=True)]
+        accounts = [owned_drive(session, user, account_id, allow_expired=True)]
     moment = now_utc()
     start_at = end_at = None
     if start or end:
@@ -120,7 +120,7 @@ def created_share_stats(
         start_at, end_at = date_bounds(start, end, now_utc())
     except ValueError as error:
         raise HTTPException(status_code=422, detail="时间范围无效") from error
-    data = query_created_shares(session, list_baidu(session, user.id), start_at, end_at, page, _page_size(page_size))
+    data = query_created_shares(session, list_drives(session, user.id), start_at, end_at, page, _page_size(page_size))
     return CreatedSharesOut(
         page=data["page"],
         page_size=data["page_size"],
