@@ -85,7 +85,7 @@ export default function AccountSelect({
       </div>
       {open ? (
         <div id="account-select-list" role="listbox" className="absolute left-0 z-30 mt-1 w-full overflow-hidden rounded-xl border border-line bg-white py-1">
-          {accounts.length === 0 ? <p className="px-3 py-2 text-sm text-ink/45">还没有百度账号</p> : null}
+          {accounts.length === 0 ? <p className="px-3 py-2 text-sm text-ink/45">还没有网盘账号</p> : null}
           {accounts.map((account) => {
             const active = account.id === value;
             return (

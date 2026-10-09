@@ -154,17 +154,17 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ cookie }),
     }),
-  startBaiduLogin: (accountId?: number) =>
-    request<{ id: string; status: string; nickname: string | null }>("/api/accounts/baidu/login", {
+  startPanLogin: (provider: "baidu" | "quark", accountId?: number) =>
+    request<{ id: string; status: string; nickname: string | null }>(`/api/accounts/${provider}/login`, {
       method: "POST",
       body: JSON.stringify({ account_id: accountId ?? null }),
     }),
-  baiduLoginStatus: (id: string) =>
-    request<{ id: string; status: string; nickname: string | null }>(`/api/accounts/baidu/login/${id}`),
-  confirmBaiduLogin: (id: string) =>
-    request<PanAccount>(`/api/accounts/baidu/login/${id}/confirm`, { method: "POST" }),
-  cancelBaiduLogin: (id: string) =>
-    request<{ ok: boolean }>(`/api/accounts/baidu/login/${id}`, { method: "DELETE" }),
+  panLoginStatus: (provider: "baidu" | "quark", id: string) =>
+    request<{ id: string; status: string; nickname: string | null }>(`/api/accounts/${provider}/login/${id}`),
+  confirmPanLogin: (provider: "baidu" | "quark", id: string) =>
+    request<PanAccount>(`/api/accounts/${provider}/login/${id}/confirm`, { method: "POST" }),
+  cancelPanLogin: (provider: "baidu" | "quark", id: string) =>
+    request<{ ok: boolean }>(`/api/accounts/${provider}/login/${id}`, { method: "DELETE" }),
   files: (accountId: number, dir: string) =>
     request<DirEntry[]>(`/api/accounts/${accountId}/files?dir=${encodeURIComponent(dir)}`),
   createFolder: (accountId: number, directory: string, name: string) =>
@@ -182,12 +182,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  shareFile: (accountId: number, fsId: number) =>
+  shareFile: (accountId: number, body: { fs_id: number | null; path: string; name: string }) =>
     request<ShareLink>(`/api/accounts/${accountId}/files/share`, {
       method: "POST",
-      body: JSON.stringify({ fs_id: fsId }),
+      body: JSON.stringify(body),
     }),
-  downloadFile: (accountId: number, path: string, onError: (message: string) => void) => {
+  downloadFile: (accountId: number, path: string, onError: (message: string) => void, name?: string) => {
     const iframe = document.createElement("iframe");
     iframe.name = `pan-download-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     iframe.style.display = "none";
@@ -202,7 +202,9 @@ export const api = {
     };
     document.body.appendChild(iframe);
     const anchor = document.createElement("a");
-    anchor.href = `/api/accounts/${accountId}/files/download?path=${encodeURIComponent(path)}`;
+    const params = new URLSearchParams({ path });
+    if (name) params.set("name", name);
+    anchor.href = `/api/accounts/${accountId}/files/download?${params.toString()}`;
     anchor.target = iframe.name;
     document.body.appendChild(anchor);
     anchor.click();
@@ -217,7 +219,7 @@ export const api = {
   createShare: (
     accountId: number,
     directory: string,
-    targets: { fs_id: number; path: string; name: string }[],
+    targets: { fs_id: number | null; path: string; name: string }[],
     period: number,
     password: string | null,
   ) =>

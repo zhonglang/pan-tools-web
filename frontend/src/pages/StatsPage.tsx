@@ -64,7 +64,7 @@ export default function StatsPage({ user }: { user: User }) {
     api
       .accounts()
       .then((rows) => {
-        setAccounts(rows.filter((row) => row.provider === "baidu"));
+        setAccounts(rows.filter((row) => row.provider === "baidu" || row.provider === "quark"));
       })
       .catch((caught: Error) => setError(caught.message))
       .finally(() => setAccountsLoaded(true));
@@ -310,7 +310,7 @@ export default function StatsPage({ user }: { user: User }) {
               {!loading && accountsLoaded && accounts.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="px-4 py-10 text-center text-ink/45">
-                    还没有百度账号。
+                    还没有网盘账号。
                   </td>
                 </tr>
               ) : null}

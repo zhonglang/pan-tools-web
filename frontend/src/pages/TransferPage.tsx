@@ -192,7 +192,8 @@ export default function TransferPage() {
   const [reloadKey, setReloadKey] = useState(0);
 
   const account = accounts.find((item) => item.id === accountId) ?? null;
-  const canBrowse = account?.provider === "baidu" && account.status === "valid";
+  const canBrowse = (account?.provider === "baidu" || account?.provider === "quark") && account.status === "valid";
+  const [trail, setTrail] = useState<{ name: string; path: string }[]>([{ name: "根目录", path: "/" }]);
 
   useEffect(() => {
     api
@@ -201,7 +202,7 @@ export default function TransferPage() {
         setAccounts(rows);
         setAccountId((current) => {
           if (current !== null && rows.some((row) => row.id === current)) return current;
-          const first = rows.find((row) => row.provider === "baidu" && row.status === "valid") ?? rows[0];
+          const first = rows.find((row) => (row.provider === "baidu" || row.provider === "quark") && row.status === "valid") ?? rows[0];
           return first?.id ?? null;
         });
       })
@@ -279,6 +280,7 @@ export default function TransferPage() {
   function openAccount(next: PanAccount) {
     setAccountId(next.id);
     setDirectory("/");
+    setTrail([{ name: "根目录", path: "/" }]);
     setQuery("");
     setKeyword("");
     setComposer(false);
@@ -287,14 +289,10 @@ export default function TransferPage() {
 
   async function shareEntry(entry: DirEntry) {
     if (accountId === null || busyPath) return;
-    if (entry.fs_id == null) {
-      setError("这个文件暂时不能分享");
-      return;
-    }
     setBusyPath(entry.path);
     setError("");
     try {
-      const shared = await api.shareFile(accountId, entry.fs_id);
+      const shared = await api.shareFile(accountId, { fs_id: entry.fs_id, path: entry.path, name: entry.name });
       setCopied(false);
       setShareResult({ name: entry.name, url: shared.url, password: shared.password });
     } catch (caught) {
@@ -308,7 +306,7 @@ export default function TransferPage() {
     if (accountId === null || busyPath) return;
     setError("");
     if (!entry.is_dir) {
-      api.downloadFile(accountId, entry.path, setError);
+      api.downloadFile(accountId, entry.path, setError, entry.name);
       return;
     }
     try {
@@ -383,10 +381,16 @@ export default function TransferPage() {
     }
   }
 
-  function openDirectory(path: string) {
+  function openDirectory(path: string, name?: string) {
     setDirectory(path);
     setQuery("");
     setKeyword("");
+    if (account?.provider !== "quark") return;
+    setTrail((current) => {
+      const index = current.findIndex((item) => item.path === path);
+      if (index >= 0) return current.slice(0, index + 1);
+      return [...current, { name: name || "文件夹", path }];
+    });
   }
 
   async function loadSheet(file: File) {
@@ -405,8 +409,24 @@ export default function TransferPage() {
     }
   }
 
+  function linkNote(provider: RecognizedShare["provider"]) {
+    if (provider === "unknown") return "无法识别";
+    if (!account) return "";
+    if (provider !== account.provider) return provider === "baidu" ? "请使用百度账号" : "请使用夸克账号";
+    return "";
+  }
+
   async function submit() {
     if (accountId === null) return;
+    const blocked = recognized.map((item) => linkNote(item.provider)).find(Boolean);
+    if (blocked) {
+      setDialogError(blocked);
+      return;
+    }
+    if (/pan\.xunlei\.com/i.test(links)) {
+      setDialogError("暂未开放");
+      return;
+    }
     setPending(true);
     setError("");
     try {
@@ -432,7 +452,7 @@ export default function TransferPage() {
             <p className="px-2 py-4 text-sm leading-6 text-ink/55">
               还没有网盘。先去
               <Link to="/accounts" className="font-medium text-primary-dark">
-                绑定百度账号
+                绑定网盘账号
               </Link>
               。
             </p>
@@ -529,7 +549,7 @@ export default function TransferPage() {
           </button>
           <span className="h-4 w-px bg-[#e4e7ee]" />
           <nav className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-            {crumbs(directory).map((crumb, index) => (
+            {(account?.provider === "quark" ? trail : crumbs(directory)).map((crumb, index) => (
               <span key={crumb.path} className="flex items-center gap-1">
                 {index > 0 ? <span className="text-[#d0d5dd]">/</span> : null}
                 <button
@@ -598,10 +618,10 @@ export default function TransferPage() {
                         aria-label={entry.is_dir ? `打开文件夹 ${entry.name}` : undefined}
                         onClick={() => setSelected(entry.path)}
                         onDoubleClick={() => {
-                          if (entry.is_dir) openDirectory(entry.path);
+                          if (entry.is_dir) openDirectory(entry.path, entry.name);
                         }}
                         onKeyDown={(event) => {
-                          if (entry.is_dir && event.key === "Enter") openDirectory(entry.path);
+                          if (entry.is_dir && event.key === "Enter") openDirectory(entry.path, entry.name);
                         }}
                         className={`group border-t border-[#f2f4f7] ${
                           selected === entry.path ? "bg-muted" : "bg-white hover:bg-[#fafafa]"
@@ -803,11 +823,12 @@ export default function TransferPage() {
               <ul className="mt-3 space-y-2 rounded-xl bg-[#f8f9fc] px-4 py-3 text-sm">
                 <li className="text-xs text-[#98a2b3]">已识别 {recognized.length} 个链接</li>
                 {recognized.length === 0 ? <li className="text-[#98a2b3]">没有识别到分享链接</li> : null}
+                {/pan\.xunlei\.com/i.test(links) ? <li className="text-[#667085]">迅雷 · 暂未开放</li> : null}
                 {recognized.map((item, index) => (
                   <li key={`${item.url}-${index}`} className="min-w-0">
                     {item.title ? <div className="truncate font-medium text-[#1f2430]">{item.title}</div> : null}
                     <div className="truncate text-[#667085]">
-                      {item.provider === "quark" ? "夸克 · 暂未开放 · " : item.provider === "unknown" ? "无法识别 · " : ""}
+                      {linkNote(item.provider) ? `${linkNote(item.provider)} · ` : ""}
                       {item.url}
                     </div>
                   </li>

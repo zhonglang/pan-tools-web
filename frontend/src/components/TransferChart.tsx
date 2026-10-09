@@ -72,7 +72,7 @@ export default function TransferChart({
       <div className="relative mt-3 aspect-[720/280]">
         {!hasPoint ? (
           <p className="flex h-full items-center justify-center text-sm text-ink/45">
-            {lines.length === 0 ? "还没有百度账号。" : "这段日期还没有可绘制的转存快照。"}
+            {lines.length === 0 ? "还没有网盘账号。" : "这段日期还没有可绘制的转存快照。"}
           </p>
         ) : (
           <>

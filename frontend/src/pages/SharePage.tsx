@@ -24,18 +24,30 @@ export default function SharePage({ user }: { user: User }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [trail, setTrail] = useState<{ name: string; path: string }[]>([{ name: "根目录", path: "/" }]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const paged = pageOf(entries, page, pageSize);
+  const account = accounts.find((item) => item.id === accountId) ?? null;
+
+  function openDirectory(path: string, name?: string) {
+    setDirectory(path);
+    if (account?.provider !== "quark") return;
+    setTrail((current) => {
+      const index = current.findIndex((item) => item.path === path);
+      if (index >= 0) return current.slice(0, index + 1);
+      return [...current, { name: name || "文件夹", path }];
+    });
+  }
 
   useEffect(() => {
     api
       .accounts()
       .then((rows) => {
-        const baidu = rows.filter((row) => row.provider === "baidu" && row.status === "valid");
-        setAccounts(baidu);
-        setAccountId(baidu[0]?.id ?? null);
+        const drives = rows.filter((row) => (row.provider === "baidu" || row.provider === "quark") && row.status === "valid");
+        setAccounts(drives);
+        setAccountId(drives[0]?.id ?? null);
       })
       .catch((caught: Error) => setError(caught.message));
   }, []);
@@ -80,9 +92,7 @@ export default function SharePage({ user }: { user: User }) {
 
   async function submit() {
     if (accountId == null) return;
-    const targets = chosen
-      .filter((entry) => entry.fs_id != null)
-      .map((entry) => ({ fs_id: entry.fs_id as number, path: entry.path, name: entry.name }));
+    const targets = chosen.map((entry) => ({ fs_id: entry.fs_id, path: entry.path, name: entry.name }));
     if (targets.length === 0) {
       setError("请选择要分享的文件");
       return;
@@ -119,20 +129,23 @@ export default function SharePage({ user }: { user: User }) {
           onChange={(event) => {
             setAccountId(Number(event.target.value));
             setDirectory("/");
+            setTrail([{ name: "根目录", path: "/" }]);
             setSelected({});
           }}
         >
-          {accounts.length === 0 ? <option value="">还没有可用的百度账号</option> : null}
+          {accounts.length === 0 ? <option value="">还没有可用的网盘账号</option> : null}
           {accounts.map((account) => (
             <option key={account.id} value={account.id}>
               {account.nickname}
             </option>
           ))}
         </select>
-        <button type="button" className="text-sm text-primary-dark" disabled={!parentOf(directory)} onClick={() => parentOf(directory) && setDirectory(parentOf(directory) as string)}>
+        <button type="button" className="text-sm text-primary-dark" disabled={!parentOf(directory)} onClick={() => parentOf(directory) && openDirectory(parentOf(directory) as string)}>
           返回上一级
         </button>
-        <span className="text-sm text-ink/60">{directory}</span>
+        <span className="text-sm text-ink/60">
+          {account?.provider === "quark" ? trail.map((item) => item.name).join(" / ") : directory}
+        </span>
       </div>
       <div className="mt-4 overflow-hidden rounded-2xl border border-line bg-white">
         <table className="w-full min-w-[640px] border-collapse text-left text-sm">
@@ -160,7 +173,7 @@ export default function SharePage({ user }: { user: User }) {
                 </td>
                 <td className="px-4 py-3">
                   {entry.is_dir ? (
-                    <button type="button" className="font-medium text-primary-dark" onClick={() => setDirectory(entry.path)}>
+                    <button type="button" className="font-medium text-primary-dark" onClick={() => openDirectory(entry.path, entry.name)}>
                       {entry.name}
                     </button>
                   ) : (
