@@ -23,7 +23,13 @@ def can_use_paid_features(user: User, now: datetime) -> bool:
     return user.role == "admin" or effective_plan(user, now) == "paid"
 
 
-def baidu_account_limit(user: User, now: datetime) -> int:
+def account_limit(user: User, now: datetime) -> int | None:
+    if user.role == "admin":
+        return None
     if can_use_paid_features(user, now):
         return 5
     return 1
+
+
+def baidu_account_limit(user: User, now: datetime) -> int | None:
+    return account_limit(user, now)

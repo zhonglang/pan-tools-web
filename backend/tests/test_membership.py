@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.services.membership import baidu_account_limit, can_use_paid_features, effective_plan
+from app.services.membership import account_limit, baidu_account_limit, can_use_paid_features, effective_plan
 from app.models import User
 
 
@@ -63,4 +63,20 @@ def test_expired_paid_user_can_bind_one_baidu_account():
 
 def test_admin_can_bind_five_baidu_accounts():
     user = _user("admin", "free", None)
-    assert baidu_account_limit(user, datetime.now(timezone.utc)) == 5
+    assert baidu_account_limit(user, datetime.now(timezone.utc)) is None
+
+
+def test_account_limit_is_per_provider():
+    now = datetime.now(timezone.utc)
+    user = User(email="free@example.com", password_hash="x", role="user", plan="free")
+    assert account_limit(user, now) == 1
+    paid = User(
+        email="paid@example.com",
+        password_hash="x",
+        role="user",
+        plan="paid",
+        plan_expires_at=now + timedelta(days=1),
+    )
+    assert account_limit(paid, now) == 5
+    admin = User(email="admin@example.com", password_hash="x", role="admin", plan="free")
+    assert account_limit(admin, now) is None

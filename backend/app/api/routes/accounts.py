@@ -9,10 +9,10 @@ from sqlalchemy.orm import Session
 from app.core.crypto import encrypt_cookie
 from app.core.deps import get_current_user, get_db, now_utc
 from app.crud.accounts import add as add_account
-from app.crud.accounts import count_valid_baidu, get_for_user, list_for_user
+from app.crud.accounts import count_valid, get_for_user, list_for_user
 from app.models import PanAccount, User
 from app.services.baidu_login_sessions import LoginSessionStore
-from app.services.membership import baidu_account_limit
+from app.services.membership import account_limit
 from app.pans import LoginRejected, ProviderClosed, adapter_for
 from app.pans.baidu_login import QrLoginFailed, poll_qr, start_qr
 from app.schemas import AccountBindIn, AccountCookieIn, AccountOut, BaiduLoginOut, BaiduLoginStartIn
@@ -69,15 +69,17 @@ def to_account_out(account: PanAccount) -> AccountOut:
     )
 
 
-def ensure_baidu_slot(session: Session, user: User, now: datetime, account: PanAccount | None) -> None:
-    if account is not None and account.provider == "baidu" and account.status == "valid":
+def ensure_slot(session: Session, user: User, now: datetime, provider: str, account: PanAccount | None) -> None:
+    if account is not None and account.provider == provider and account.status == "valid":
         return
-    limit = baidu_account_limit(user, now)
-    count = count_valid_baidu(session, user.id)
-    if count >= limit:
+    limit = account_limit(user, now)
+    if limit is None:
+        return
+    if count_valid(session, user.id, provider) >= limit:
+        name = "百度" if provider == "baidu" else "夸克"
         if limit == 1:
-            raise HTTPException(status_code=422, detail="免费用户只能绑定 1 个百度账号")
-        raise HTTPException(status_code=422, detail="最多绑定 5 个百度账号")
+            raise HTTPException(status_code=422, detail=f"免费用户只能绑定 1 个{name}账号")
+        raise HTTPException(status_code=422, detail=f"最多绑定 5 个{name}账号")
 
 
 def verified_nickname(provider: str, cookie: str, client: httpx.Client) -> str:
@@ -120,8 +122,8 @@ def bind_account(
     cookie = clean_cookie(body.cookie)
     if body.provider not in {"baidu", "quark", "xunlei"}:
         raise HTTPException(status_code=422, detail="网盘类型无效")
-    if body.provider == "baidu":
-        ensure_baidu_slot(session, user, now, None)
+    if body.provider in {"baidu", "quark"}:
+        ensure_slot(session, user, now, body.provider, None)
     nickname = verified_nickname(body.provider, cookie, get_pan_http_client(request))
     account = PanAccount(
         user_id=user.id,
@@ -148,8 +150,8 @@ def update_cookie(
     account = get_for_user(session, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
-    if account.provider == "baidu":
-        ensure_baidu_slot(session, user, now, account)
+    if account.provider in {"baidu", "quark"}:
+        ensure_slot(session, user, now, account.provider, account)
     nickname = verified_nickname(account.provider, cookie, get_pan_http_client(request))
     account.nickname = nickname
     account.cookie_ciphertext = encrypt_cookie(cookie, request.app.state.settings.cookie_fernet_key)
@@ -175,7 +177,7 @@ def start_baidu_login(
     account = None
     if body.account_id is not None:
         account = owned_account(session, user, body.account_id)
-    ensure_baidu_slot(session, user, now, account)
+    ensure_slot(session, user, now, "baidu", account)
     try:
         with pan_client(request) as client:
             started = start_qr(client)
@@ -261,7 +263,7 @@ def confirm_baidu_login(
     account = None
     if item.account_id is not None:
         account = owned_account(session, user, item.account_id)
-    ensure_baidu_slot(session, user, now, account)
+    ensure_slot(session, user, now, "baidu", account)
     if account is None:
         account = PanAccount(
             user_id=user.id,

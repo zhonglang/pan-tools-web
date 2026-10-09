@@ -18,13 +18,17 @@ def list_baidu(session: Session, user_id: int) -> list[PanAccount]:
     )
 
 
-def count_valid_baidu(session: Session, user_id: int) -> int:
+def count_valid(session: Session, user_id: int, provider: str) -> int:
     count = session.scalar(
         select(func.count())
         .select_from(PanAccount)
-        .where(PanAccount.user_id == user_id, PanAccount.provider == "baidu", PanAccount.status == "valid")
+        .where(PanAccount.user_id == user_id, PanAccount.provider == provider, PanAccount.status == "valid")
     )
     return int(count or 0)
+
+
+def count_valid_baidu(session: Session, user_id: int) -> int:
+    return count_valid(session, user_id, "baidu")
 
 
 def add(session: Session, account: PanAccount) -> PanAccount:
