@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, type DirEntry, type DownloadTask, type PanAccount } from "../api";
-import FolderPicker from "../components/FolderPicker";
+import { api, type CopyTargetResult, type DirEntry, type DownloadTask, type PanAccount, type User } from "../api";
+import { planBatchRename, type BatchRenameSide } from "../batchRename";
+import AccountRail from "../components/AccountRail";
+import CopyToPicker from "../components/CopyToPicker";
+import FolderPicker, { type FolderCrumb } from "../components/FolderPicker";
 import TablePager, { PAGE_SIZE, pageOf } from "../components/TablePager";
 import { workbookText } from "../sheets";
-
-const providerName: Record<string, string> = { baidu: "百度网盘", quark: "夸克", xunlei: "迅雷" };
 
 function formatBytes(value: number) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -39,8 +40,30 @@ function formatSize(entry: DirEntry) {
   return `${value.toFixed(digits)} ${units[unit]}`;
 }
 
-function formatTime(entry: DirEntry) {
-  if (entry.modified_at == null) return "--";
+type TableSort = { key: "name" | "created" | "modified"; dir: "asc" | "desc" };
+
+function compareEntries(left: DirEntry, right: DirEntry, sort: TableSort | null) {
+  if (sort === null) {
+    if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1;
+    return left.name.localeCompare(right.name, "zh-CN");
+  }
+  const factor = sort.dir === "asc" ? 1 : -1;
+  if (sort.key === "name") {
+    const byName = left.name.localeCompare(right.name, "zh-CN");
+    if (byName !== 0) return byName * factor;
+    return left.path.localeCompare(right.path, "zh-CN");
+  }
+  const leftTime = sort.key === "created" ? left.created_at : left.modified_at;
+  const rightTime = sort.key === "created" ? right.created_at : right.modified_at;
+  if (leftTime == null && rightTime == null) return left.name.localeCompare(right.name, "zh-CN");
+  if (leftTime == null) return 1;
+  if (rightTime == null) return -1;
+  if (leftTime !== rightTime) return (leftTime - rightTime) * factor;
+  return left.name.localeCompare(right.name, "zh-CN");
+}
+
+function formatStamp(value: number | null) {
+  if (value == null) return "--";
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
@@ -49,7 +72,7 @@ function formatTime(entry: DirEntry) {
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
-  }).format(new Date(entry.modified_at * 1000));
+  }).format(new Date(value * 1000));
 }
 
 function fileKind(entry: DirEntry) {
@@ -76,13 +99,25 @@ function parentOf(directory: string) {
   return parent || "/";
 }
 
-const SHARE_URL = /https?:\/\/(?:pan\.baidu\.com\/s\/1[0-9A-Za-z_-]+|pan\.quark\.cn\/s\/[0-9A-Za-z]+)(?:\?[^\s\u00a0]*)?/;
+const SHARE_URL = /https?:\/\/(?:pan\.baidu\.com\/s\/1[0-9A-Za-z_-]+|pan\.quark\.cn\/s\/[0-9A-Za-z]+|pan\.xunlei\.com\/s\/[0-9A-Za-z_-]+)(?:\?[^\s\u00a0]*)?/;
 const SHARE_CAPTION = /通过百度网盘分享|通过夸克网盘|我用夸克网盘|超级会员/;
 const SHARE_FOOTER = /复制这段内容|即可获取|点击链接或复制整段内容|提取码\s*[:：]\s*[0-9A-Za-z]{4}/;
 const SHARE_TITLE = /分享的文件\s*[:：]\s*(.+)\s*$/m;
 const QUARK_TITLE = /分享了「([^」]+)」/;
 
-type RecognizedShare = { title: string | null; url: string; provider: "baidu" | "quark" | "unknown" };
+type ShareProvider = "baidu" | "quark" | "xunlei" | "unknown";
+type RecognizedShare = { title: string | null; url: string; provider: ShareProvider };
+
+function shareProvider(url: string): ShareProvider {
+  if (url.includes("pan.quark.cn")) return "quark";
+  if (url.includes("pan.xunlei.com")) return "xunlei";
+  if (url.includes("pan.baidu.com")) return "baidu";
+  return "unknown";
+}
+
+function usesFileId(provider: string | undefined) {
+  return provider === "quark" || provider === "xunlei";
+}
 
 function recognizeShares(text: string): RecognizedShare[] {
   const lines = text.split(/\r?\n/);
@@ -103,7 +138,7 @@ function recognizeShares(text: string): RecognizedShare[] {
     const title = block.match(SHARE_TITLE)?.[1]?.trim() || block.match(QUARK_TITLE)?.[1]?.trim() || null;
     found.push({
       index,
-      item: { title, url, provider: url.includes("pan.quark.cn") ? "quark" : "baidu" },
+      item: { title, url, provider: shareProvider(url) },
     });
   });
   const seen = new Set<string>();
@@ -113,6 +148,7 @@ function recognizeShares(text: string): RecognizedShare[] {
     .filter((item) => {
       const identity = item.url.match(/pan\.baidu\.com\/s\/1([0-9A-Za-z_-]+)/)?.[1]
         || item.url.match(/pan\.quark\.cn\/s\/([0-9A-Za-z]+)/)?.[1]
+        || item.url.match(/pan\.xunlei\.com\/s\/([0-9A-Za-z_-]+)/)?.[1]
         || item.url;
       if (seen.has(identity)) return false;
       seen.add(identity);
@@ -153,12 +189,22 @@ function FileIcon() {
   );
 }
 
-export default function TransferPage() {
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
+      <rect x="9" y="3" width="11" height="14" rx="2" stroke="currentColor" strokeWidth="1.75" />
+      <rect x="4" y="7" width="11" height="14" rx="2" stroke="currentColor" strokeWidth="1.75" />
+    </svg>
+  );
+}
+
+export default function TransferPage({ user }: { user: User }) {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState<PanAccount[]>([]);
   const [accountId, setAccountId] = useState<number | null>(null);
   const [directory, setDirectory] = useState("/");
   const [page, setPage] = useState(1);
+  const [tableSort, setTableSort] = useState<TableSort | null>(null);
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [query, setQuery] = useState("");
@@ -175,24 +221,62 @@ export default function TransferPage() {
   const [intervalMin, setIntervalMin] = useState(3);
   const [intervalMax, setIntervalMax] = useState(6);
   const [targetPath, setTargetPath] = useState("/");
+  const [targetTrail, setTargetTrail] = useState<FolderCrumb[]>([{ name: "根目录", path: "/" }]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [sheetName, setSheetName] = useState("");
   const [sheetOver, setSheetOver] = useState(false);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<DirEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const renameLock = useRef(false);
+  const renameTargetRef = useRef<DirEntry | null>(null);
+  renameTargetRef.current = renameTarget;
   const [deleteTarget, setDeleteTarget] = useState<DirEntry | null>(null);
+  const [copyTarget, setCopyTarget] = useState<DirEntry | null>(null);
+  const [copyPending, setCopyPending] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const [copyFailures, setCopyFailures] = useState<CopyTargetResult[]>([]);
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [mkdirName, setMkdirName] = useState("");
   const [mkdirPending, setMkdirPending] = useState(false);
   const [downloads, setDownloads] = useState<DownloadTask[]>([]);
+  const [checked, setChecked] = useState<Record<string, DirEntry>>({});
+  const [period, setPeriod] = useState(0);
+  const [shareDefaults, setShareDefaults] = useState({ baidu: "", quark: "", xunlei: "" });
+  const [shareOpen, setShareOpen] = useState(false);
+  const [visibility, setVisibility] = useState<"public" | "private">("public");
+  const [shareCode, setShareCode] = useState("");
+  const [shareDialogError, setShareDialogError] = useState("");
+  const [sharePending, setSharePending] = useState(false);
+  const [batchRenameOpen, setBatchRenameOpen] = useState(false);
+  const [batchSide, setBatchSide] = useState<BatchRenameSide>("front");
+  const [batchStart, setBatchStart] = useState("");
+  const [batchError, setBatchError] = useState("");
+  const [batchPending, setBatchPending] = useState(false);
   const [shareResult, setShareResult] = useState<{ name: string; url: string; password: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [toast, setToast] = useState("");
+  const toastTimer = useRef(0);
   const sheetInput = useRef<HTMLInputElement>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
+  function showToast(message: string) {
+    setToast(message);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function copyName(name: string) {
+    try {
+      await navigator.clipboard.writeText(name);
+      showToast("已复制");
+    } catch {
+      showToast("复制失败");
+    }
+  }
+
   const account = accounts.find((item) => item.id === accountId) ?? null;
-  const canBrowse = (account?.provider === "baidu" || account?.provider === "quark") && account.status === "valid";
+  const canBrowse = (account?.provider === "baidu" || account?.provider === "quark" || account?.provider === "xunlei") && account.status === "valid";
   const [trail, setTrail] = useState<{ name: string; path: string }[]>([{ name: "根目录", path: "/" }]);
 
   useEffect(() => {
@@ -202,12 +286,23 @@ export default function TransferPage() {
         setAccounts(rows);
         setAccountId((current) => {
           if (current !== null && rows.some((row) => row.id === current)) return current;
-          const first = rows.find((row) => (row.provider === "baidu" || row.provider === "quark") && row.status === "valid") ?? rows[0];
+          const first = rows.find((row) => (row.provider === "baidu" || row.provider === "quark" || row.provider === "xunlei") && row.status === "valid") ?? rows[0];
           return first?.id ?? null;
         });
       })
       .catch((caught: Error) => setError(caught.message));
-  }, []);
+    if (!user.paid_features) return;
+    api
+      .sharePasswords()
+      .then((row) =>
+        setShareDefaults({
+          baidu: row.baidu_password ?? "",
+          quark: row.quark_password ?? "",
+          xunlei: row.xunlei_password ?? "",
+        }),
+      )
+      .catch(() => setShareDefaults({ baidu: "", quark: "", xunlei: "" }));
+  }, [user.paid_features]);
 
   useEffect(() => {
     let stopped = false;
@@ -265,11 +360,8 @@ export default function TransferPage() {
     return entries
       .filter((entry) => (needle ? entry.name.toLowerCase().includes(needle) : true))
       .slice()
-      .sort((left, right) => {
-        if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1;
-        return left.name.localeCompare(right.name, "zh-CN");
-      });
-  }, [entries, keyword]);
+      .sort((left, right) => compareEntries(left, right, tableSort));
+  }, [entries, keyword, tableSort]);
 
   useEffect(() => {
     setPage(1);
@@ -284,7 +376,39 @@ export default function TransferPage() {
     setQuery("");
     setKeyword("");
     setComposer(false);
+    setChecked({});
     setError("");
+  }
+
+  async function submitCopyTo(targets: string[]) {
+    if (accountId === null || copyTarget === null || copyPending) return;
+    setCopyPending(true);
+    setCopyError("");
+    setCopyFailures([]);
+    try {
+      const result = await api.copyFiles(accountId, {
+        path: copyTarget.path,
+        fs_id: copyTarget.fs_id,
+        name: copyTarget.name,
+        is_dir: copyTarget.is_dir,
+        targets,
+      });
+      const failed = result.results.filter((row) => !row.ok);
+      if (result.failed === 0) {
+        setCopyTarget(null);
+        showToast(`已复制到 ${result.succeeded} 个目录`);
+      } else if (result.succeeded > 0) {
+        setCopyFailures(failed);
+        showToast(`已复制到 ${result.succeeded} 个目录`);
+      } else {
+        setCopyError(failed[0]?.error || "复制失败");
+        setCopyFailures(failed);
+      }
+    } catch (caught) {
+      setCopyError(caught instanceof Error ? caught.message : "复制失败");
+    } finally {
+      setCopyPending(false);
+    }
   }
 
   async function shareEntry(entry: DirEntry) {
@@ -346,13 +470,23 @@ export default function TransferPage() {
     }
   }
 
+  function cancelRename() {
+    if (renameLock.current) return;
+    setRenameTarget(null);
+  }
+
   async function confirmRename() {
-    if (accountId === null || renameTarget === null || busyPath) return;
+    if (accountId === null || renameTarget === null || busyPath || renameLock.current) return;
     const name = renameValue.trim();
+    if (name === renameTarget.name) {
+      setRenameTarget(null);
+      return;
+    }
     if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
       setError("名称无效");
       return;
     }
+    renameLock.current = true;
     setBusyPath(renameTarget.path);
     setError("");
     try {
@@ -362,6 +496,7 @@ export default function TransferPage() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "重命名失败");
     } finally {
+      renameLock.current = false;
       setBusyPath(null);
     }
   }
@@ -385,7 +520,8 @@ export default function TransferPage() {
     setDirectory(path);
     setQuery("");
     setKeyword("");
-    if (account?.provider !== "quark") return;
+    setChecked({});
+    if (!usesFileId(account?.provider)) return;
     setTrail((current) => {
       const index = current.findIndex((item) => item.path === path);
       if (index >= 0) return current.slice(0, index + 1);
@@ -412,7 +548,11 @@ export default function TransferPage() {
   function linkNote(provider: RecognizedShare["provider"]) {
     if (provider === "unknown") return "无法识别";
     if (!account) return "";
-    if (provider !== account.provider) return provider === "baidu" ? "请使用百度账号" : "请使用夸克账号";
+    if (provider !== account.provider) {
+      if (provider === "baidu") return "请使用百度账号";
+      if (provider === "quark") return "请使用夸克账号";
+      return "请使用迅雷账号";
+    }
     return "";
   }
 
@@ -423,14 +563,12 @@ export default function TransferPage() {
       setDialogError(blocked);
       return;
     }
-    if (/pan\.xunlei\.com/i.test(links)) {
-      setDialogError("暂未开放");
-      return;
-    }
     setPending(true);
     setError("");
     try {
-      const job = await api.createTransfer(accountId, targetPath.trim() || directory, links);
+      const path = targetPath.trim() || directory;
+      const label = usesFileId(account?.provider) ? targetTrail.map((item) => item.name).join(" / ") : path;
+      const job = await api.createTransfer(accountId, path, links, label);
       navigate(`/jobs/${job.id}`);
     } catch (caught) {
       setDialogError(caught instanceof Error ? caught.message : "转存失败");
@@ -439,55 +577,146 @@ export default function TransferPage() {
     }
   }
 
+  function toggleCheck(entry: DirEntry) {
+    setChecked((current) => {
+      const next = { ...current };
+      if (next[entry.path]) delete next[entry.path];
+      else next[entry.path] = entry;
+      return next;
+    });
+  }
+
+  function selectMatching(targets: DirEntry[]) {
+    setChecked((current) => {
+      const next = { ...current };
+      const allOn = targets.length > 0 && targets.every((entry) => next[entry.path]);
+      for (const entry of targets) {
+        if (allOn) delete next[entry.path];
+        else next[entry.path] = entry;
+      }
+      return next;
+    });
+  }
+
+  const listed = new Set(entries.map((entry) => entry.path));
+  const folders = entries.filter((entry) => entry.is_dir);
+  const pageRows = paged.rows;
+  const pageSelected = pageRows.length > 0 && pageRows.every((entry) => checked[entry.path]);
+  const pagePartial = pageRows.some((entry) => checked[entry.path]) && !pageSelected;
+  const allFoldersSelected = folders.length > 0 && folders.every((entry) => checked[entry.path]);
+  const chosen = Object.values(checked).filter((entry) => {
+    if (usesFileId(account?.provider)) return listed.has(entry.path);
+    const parentPath = entry.path.slice(0, entry.path.lastIndexOf("/")) || "/";
+    return parentPath === directory;
+  });
+  const chosenPaths = new Set(chosen.map((entry) => entry.path));
+  const renameTargets = entries.filter((entry) => chosenPaths.has(entry.path));
+  const batchPlan = batchRenameOpen ? planBatchRename(renameTargets, batchSide, batchStart) : null;
+  const baiduLocked = account?.provider === "baidu";
+  const xunleiQuick = account?.provider === "xunlei";
+  const columnCount = user.paid_features ? 7 : 6;
+
+  function openBatchRename() {
+    setBatchSide("front");
+    setBatchStart("");
+    setBatchError("");
+    setBatchRenameOpen(true);
+  }
+
+  async function submitBatchRename() {
+    if (accountId === null || batchPending) return;
+    const plan = planBatchRename(renameTargets, batchSide, batchStart);
+    if (!plan.ok) {
+      setBatchError(plan.error);
+      return;
+    }
+    const rows = plan.rows.filter((row) => row.name !== row.item.name);
+    for (const row of rows) {
+      if (!row.name || row.name === "." || row.name === ".." || row.name.includes("/") || row.name.includes("\\")) {
+        setBatchError(`「${row.item.name}」的新名称无效`);
+        return;
+      }
+    }
+    setBatchPending(true);
+    setBatchError("");
+    try {
+      for (const row of rows) {
+        await api.renameFile(accountId, row.item.path, row.name);
+      }
+      setChecked({});
+      setBatchRenameOpen(false);
+      setReloadKey((value) => value + 1);
+    } catch (caught) {
+      setBatchError(caught instanceof Error ? caught.message : "重命名失败");
+      setReloadKey((value) => value + 1);
+    } finally {
+      setBatchPending(false);
+    }
+  }
+
+  function openBatchShare() {
+    setVisibility(baiduLocked ? "private" : "public");
+    const provider = account?.provider === "xunlei" ? "xunlei" : "quark";
+    setShareCode(baiduLocked ? shareDefaults.baidu : shareDefaults[provider]);
+    setShareDialogError("");
+    setShareOpen(true);
+  }
+
+  function chooseVisibility(next: "public" | "private") {
+    if (baiduLocked || xunleiQuick) return;
+    setVisibility(next);
+    setShareDialogError("");
+    if (next === "private" && !shareCode.trim()) {
+      setShareCode(account?.provider === "xunlei" ? shareDefaults.xunlei : shareDefaults.quark);
+    }
+  }
+
+  async function submitBatchShare() {
+    if (accountId === null) return;
+    const targets = chosen.map((entry) => ({ fs_id: entry.fs_id, path: entry.path, name: entry.name }));
+    if (targets.length === 0) {
+      setShareDialogError("请选择要分享的文件");
+      return;
+    }
+    const trimmed = shareCode.trim();
+    if (!xunleiQuick && visibility === "private" && !/^[0-9A-Za-z]{4}$/.test(trimmed)) {
+      setShareDialogError("提取码需要 4 位字母或数字");
+      return;
+    }
+    setSharePending(true);
+    setShareDialogError("");
+    setError("");
+    try {
+      const label = usesFileId(account?.provider) ? trail.map((item) => item.name).join(" / ") : directory;
+      const job = await api.createShare(
+        accountId,
+        directory,
+        targets,
+        period,
+        xunleiQuick ? "public" : visibility,
+        xunleiQuick || visibility !== "private" ? null : trimmed,
+        label,
+      );
+      setShareOpen(false);
+      setChecked({});
+      navigate(`/jobs/${job.id}`);
+    } catch (caught) {
+      setShareDialogError(caught instanceof Error ? caught.message : "分享失败");
+    } finally {
+      setSharePending(false);
+    }
+  }
+
   const parent = parentOf(directory);
 
   return (
     <div className="flex min-h-[calc(100dvh-6.5rem)] flex-col bg-canvas lg:h-dvh lg:min-h-0 lg:flex-row">
-      <aside className="flex w-full shrink-0 flex-col border-b border-line bg-white lg:w-[232px] lg:border-r lg:border-b-0">
-        <div className="px-4 py-4">
-          <p className="text-sm font-semibold text-ink">网盘</p>
-        </div>
-        <div className="flex gap-2 overflow-x-auto px-3 pb-3 lg:block lg:min-h-0 lg:flex-1 lg:space-y-2 lg:overflow-y-auto">
-          {accounts.length === 0 ? (
-            <p className="px-2 py-4 text-sm leading-6 text-ink/55">
-              还没有网盘。先去
-              <Link to="/accounts" className="font-medium text-primary-dark">
-                绑定网盘账号
-              </Link>
-              。
-            </p>
-          ) : null}
-          {accounts.map((item) => {
-            const active = item.id === accountId;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => openAccount(item)}
-                className={`flex min-w-44 items-center gap-3 rounded-xl px-3 py-3 text-left lg:w-full lg:min-w-0 ${
-                  active ? "bg-muted ring-1 ring-primary/25" : "hover:bg-[#f7f8fa]"
-                }`}
-              >
-                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-muted text-sm font-semibold text-primary-dark">
-                  {(providerName[item.provider] ?? "盘").slice(0, 1)}
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold text-ink">{item.nickname}</span>
-                  <span className="mt-0.5 block truncate text-xs text-[#8b909a]">
-                    {providerName[item.provider] ?? item.provider}
-                    {item.status === "valid" ? " · 已登录" : " · 请重新登录"}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </aside>
+      <AccountRail accounts={accounts} accountId={accountId} onSelect={openAccount} />
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex flex-wrap items-center gap-2 border-b border-[#e8eaef] bg-white px-4 py-3">
           <form
-            className="flex min-w-[16rem] flex-1 items-center"
+            className="flex min-w-[12rem] flex-1 items-center"
             onSubmit={(event) => {
               event.preventDefault();
               setKeyword(query);
@@ -508,13 +737,49 @@ export default function TransferPage() {
             disabled={!canBrowse}
             onClick={() => {
               setTargetPath(directory);
+              setTargetTrail(usesFileId(account?.provider) ? trail : crumbs(directory));
               setDialogError("");
               setComposer(true);
             }}
-            className="h-9 rounded-full bg-ink px-4 text-sm font-medium text-white disabled:opacity-40"
+            className="inline-flex h-9 shrink-0 items-center justify-center rounded-full bg-ink px-4 text-sm font-medium text-white disabled:opacity-40"
           >
             批量转存
           </button>
+          {user.paid_features ? (
+            <>
+              <button
+                type="button"
+                disabled={!canBrowse || loading || folders.length === 0}
+                onClick={() => selectMatching(folders)}
+                className="relative inline-flex h-9 shrink-0 items-center justify-center whitespace-nowrap rounded-full border border-[#e4e7ee] bg-white px-4 text-sm font-medium text-[#344054] disabled:opacity-40"
+              >
+                <span className="invisible" aria-hidden="true">
+                  取消已选文件夹
+                </span>
+                <span className="absolute inset-0 grid place-items-center">
+                  {allFoldersSelected ? "取消已选文件夹" : "全选文件夹"}
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={!canBrowse || chosen.length === 0}
+                onClick={openBatchShare}
+                className="inline-flex h-9 shrink-0 items-center justify-center whitespace-nowrap rounded-full bg-ink px-4 text-sm font-medium text-white disabled:opacity-40"
+              >
+                分享已选
+                <span className="inline-block min-w-[2ch] text-center tabular-nums">{chosen.length}</span>
+                项
+              </button>
+              <button
+                type="button"
+                disabled={!canBrowse || chosen.length === 0}
+                onClick={openBatchRename}
+                className="inline-flex h-9 shrink-0 items-center justify-center whitespace-nowrap rounded-full border border-[#e4e7ee] bg-white px-4 text-sm font-medium text-[#344054] disabled:opacity-40"
+              >
+                批量重命名
+              </button>
+            </>
+          ) : null}
           <button
             type="button"
             disabled={!canBrowse || accountId === null}
@@ -523,7 +788,7 @@ export default function TransferPage() {
               setError("");
               setMkdirOpen(true);
             }}
-            className="h-9 rounded-full border border-[#e4e7ee] bg-white px-4 text-sm font-medium text-[#344054] disabled:opacity-40"
+            className="inline-flex h-9 shrink-0 items-center justify-center rounded-full border border-[#e4e7ee] bg-white px-4 text-sm font-medium text-[#344054] disabled:opacity-40"
           >
             新建目录
           </button>
@@ -549,7 +814,7 @@ export default function TransferPage() {
           </button>
           <span className="h-4 w-px bg-[#e4e7ee]" />
           <nav className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-            {(account?.provider === "quark" ? trail : crumbs(directory)).map((crumb, index) => (
+            {(usesFileId(account?.provider) ? trail : crumbs(directory)).map((crumb, index) => (
               <span key={crumb.path} className="flex items-center gap-1">
                 {index > 0 ? <span className="text-[#d0d5dd]">/</span> : null}
                 <button
@@ -587,24 +852,91 @@ export default function TransferPage() {
             <table className="w-full text-left text-sm">
               <thead className="sticky top-0 z-10 bg-[#f7f8fa] text-xs text-[#98a2b3]">
                 <tr>
-                  <th className="sticky left-0 bg-[#f7f8fa] px-5 py-3 font-medium">文件名</th>
+                  {user.paid_features ? (
+                    <th className="w-10 bg-[#f7f8fa] px-3 py-3 font-medium">
+                      <input
+                        ref={(node) => {
+                          if (node) node.indeterminate = pagePartial;
+                        }}
+                        type="checkbox"
+                        checked={pageSelected}
+                        disabled={loading || pageRows.length === 0}
+                        aria-label="全选当前页"
+                        onChange={() => selectMatching(pageRows)}
+                      />
+                    </th>
+                  ) : null}
+                  <th className="sticky left-0 bg-[#f7f8fa] px-5 py-3 font-medium" aria-sort={tableSort?.key === "name" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTableSort((current) =>
+                          current?.key === "name" ? { key: "name", dir: current.dir === "asc" ? "desc" : "asc" } : { key: "name", dir: "asc" },
+                        );
+                        setPage(1);
+                      }}
+                      className={`inline-flex items-center gap-1 ${tableSort?.key === "name" ? "text-[#344054]" : "hover:text-[#667085]"}`}
+                    >
+                      文件名
+                      <span className="w-3 text-[10px]" aria-hidden="true">
+                        {tableSort?.key === "name" ? (tableSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                      </span>
+                    </button>
+                  </th>
                   <th className="w-52 px-3 py-3 font-medium">操作</th>
                   <th className="w-24 px-3 py-3 font-medium">大小</th>
                   <th className="w-24 px-3 py-3 font-medium">类型</th>
-                  <th className="hidden w-40 px-3 py-3 font-medium md:table-cell">修改时间</th>
+                  <th className="hidden w-40 px-3 py-3 font-medium md:table-cell" aria-sort={tableSort?.key === "created" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTableSort((current) =>
+                          current?.key === "created"
+                            ? { key: "created", dir: current.dir === "asc" ? "desc" : "asc" }
+                            : { key: "created", dir: "asc" },
+                        );
+                        setPage(1);
+                      }}
+                      className={`inline-flex items-center gap-1 ${tableSort?.key === "created" ? "text-[#344054]" : "hover:text-[#667085]"}`}
+                    >
+                      创建时间
+                      <span className="w-3 text-[10px]" aria-hidden="true">
+                        {tableSort?.key === "created" ? (tableSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                      </span>
+                    </button>
+                  </th>
+                  <th className="hidden w-40 px-3 py-3 font-medium md:table-cell" aria-sort={tableSort?.key === "modified" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTableSort((current) =>
+                          current?.key === "modified"
+                            ? { key: "modified", dir: current.dir === "asc" ? "desc" : "asc" }
+                            : { key: "modified", dir: "asc" },
+                        );
+                        setPage(1);
+                      }}
+                      className={`inline-flex items-center gap-1 ${tableSort?.key === "modified" ? "text-[#344054]" : "hover:text-[#667085]"}`}
+                    >
+                      修改时间
+                      <span className="w-3 text-[10px]" aria-hidden="true">
+                        {tableSort?.key === "modified" ? (tableSort.dir === "asc" ? "↑" : "↓") : "↕"}
+                      </span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={5} className="px-5 py-10 text-[#98a2b3]">
+                    <td colSpan={columnCount} className="px-5 py-10 text-[#98a2b3]">
                       正在读取目录
                     </td>
                   </tr>
                 ) : null}
                 {!loading && visible.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-5 py-10 text-[#98a2b3]">
+                    <td colSpan={columnCount} className="px-5 py-10 text-[#98a2b3]">
                       这个目录是空的。双击文件夹可以进入下一级。
                     </td>
                   </tr>
@@ -621,12 +953,27 @@ export default function TransferPage() {
                           if (entry.is_dir) openDirectory(entry.path, entry.name);
                         }}
                         onKeyDown={(event) => {
+                          if (renameTarget?.path === entry.path) return;
                           if (entry.is_dir && event.key === "Enter") openDirectory(entry.path, entry.name);
                         }}
                         className={`group border-t border-[#f2f4f7] ${
                           selected === entry.path ? "bg-muted" : "bg-white hover:bg-[#fafafa]"
                         } ${entry.is_dir ? "cursor-pointer" : ""}`}
                       >
+                        {user.paid_features ? (
+                          <td
+                            className="px-3"
+                            onClick={(event) => event.stopPropagation()}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={Boolean(checked[entry.path])}
+                              aria-label={`选择 ${entry.name}`}
+                              onChange={() => toggleCheck(entry)}
+                            />
+                          </td>
+                        ) : null}
                         <td
                           className={`sticky left-0 px-5 py-3.5 ${
                             selected === entry.path ? "bg-muted" : "bg-white group-hover:bg-[#fafafa]"
@@ -634,7 +981,55 @@ export default function TransferPage() {
                         >
                           <span className="flex min-w-0 items-center gap-2.5">
                             {entry.is_dir ? <FolderIcon /> : <FileIcon />}
-                            <span className="truncate font-medium text-[#1f2430]">{entry.name}</span>
+                            {renameTarget?.path === entry.path ? (
+                              <input
+                                autoFocus
+                                value={renameValue}
+                                aria-label={`重命名 ${entry.name}`}
+                                disabled={busyPath === entry.path}
+                                onFocus={(event) => event.currentTarget.select()}
+                                onClick={(event) => event.stopPropagation()}
+                                onDoubleClick={(event) => event.stopPropagation()}
+                                onChange={(event) => setRenameValue(event.target.value)}
+                                onBlur={() => {
+                                  const path = entry.path;
+                                  window.setTimeout(() => {
+                                    if (renameTargetRef.current?.path === path) cancelRename();
+                                  }, 0);
+                                }}
+                                onKeyDown={(event) => {
+                                  event.stopPropagation();
+                                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                                    event.preventDefault();
+                                    void confirmRename();
+                                  } else if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    cancelRename();
+                                  }
+                                }}
+                                className="h-8 w-full min-w-[12rem] max-w-md flex-1 rounded-lg border border-[#d0d5dd] bg-white px-2 font-medium text-[#1f2430] outline-none disabled:opacity-60"
+                              />
+                            ) : (
+                              <>
+                                <span className="truncate font-medium text-[#1f2430]">{entry.name}</span>
+                                <button
+                                  type="button"
+                                  aria-label={`复制名称 ${entry.name}`}
+                                  className={`shrink-0 text-[#98a2b3] hover:text-[#344054] ${
+                                    selected === entry.path
+                                      ? "opacity-100"
+                                      : "opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+                                  }`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void copyName(entry.name);
+                                  }}
+                                  onDoubleClick={(event) => event.stopPropagation()}
+                                >
+                                  <CopyIcon />
+                                </button>
+                              </>
+                            )}
                             {busyPath === entry.path ? <Spinner /> : null}
                           </span>
                         </td>
@@ -660,6 +1055,20 @@ export default function TransferPage() {
                             </button>
                             <button
                               type="button"
+                              className="text-[#0e7490] disabled:opacity-40"
+                              disabled={busyPath === entry.path}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setCopyError("");
+                                setCopyFailures([]);
+                                setCopyTarget(entry);
+                              }}
+                              onDoubleClick={(event) => event.stopPropagation()}
+                            >
+                              复制到
+                            </button>
+                            <button
+                              type="button"
                               className="text-primary disabled:opacity-40"
                               disabled={busyPath === entry.path}
                               onClick={(event) => {
@@ -674,6 +1083,7 @@ export default function TransferPage() {
                               type="button"
                               className="text-[#f79009] disabled:opacity-40"
                               disabled={busyPath === entry.path}
+                              onMouseDown={(event) => event.preventDefault()}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 setError("");
@@ -709,7 +1119,8 @@ export default function TransferPage() {
                             {fileKind(entry)}
                           </span>
                         </td>
-                        <td className="hidden px-3 py-3.5 text-[#667085] md:table-cell">{formatTime(entry)}</td>
+                        <td className="hidden px-3 py-3.5 text-[#667085] md:table-cell">{formatStamp(entry.created_at)}</td>
+                        <td className="hidden px-3 py-3.5 text-[#667085] md:table-cell">{formatStamp(entry.modified_at)}</td>
                       </tr>
                     ))
                   : null}
@@ -737,7 +1148,7 @@ export default function TransferPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="transfer-title"
-            className="max-h-full w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 border border-line"
+            className="max-h-[calc(100dvh-3rem)] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 border border-line"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between">
@@ -820,20 +1231,21 @@ export default function TransferPage() {
               }}
             />
             {links.trim() ? (
-              <ul className="mt-3 space-y-2 rounded-xl bg-[#f8f9fc] px-4 py-3 text-sm">
-                <li className="text-xs text-[#98a2b3]">已识别 {recognized.length} 个链接</li>
-                {recognized.length === 0 ? <li className="text-[#98a2b3]">没有识别到分享链接</li> : null}
-                {/pan\.xunlei\.com/i.test(links) ? <li className="text-[#667085]">迅雷 · 暂未开放</li> : null}
-                {recognized.map((item, index) => (
-                  <li key={`${item.url}-${index}`} className="min-w-0">
-                    {item.title ? <div className="truncate font-medium text-[#1f2430]">{item.title}</div> : null}
-                    <div className="truncate text-[#667085]">
-                      {linkNote(item.provider) ? `${linkNote(item.provider)} · ` : ""}
-                      {item.url}
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              <div className="mt-3 rounded-xl border border-[#eef0f4] bg-[#f8f9fc] px-4 py-3 text-sm">
+                <p className="text-xs text-[#98a2b3]">已识别 {recognized.length} 个链接</p>
+                <ul className="mt-2 max-h-48 space-y-2 overflow-y-auto overscroll-contain pr-1">
+                  {recognized.length === 0 ? <li className="text-[#98a2b3]">没有识别到分享链接</li> : null}
+                  {recognized.map((item, index) => (
+                    <li key={`${item.url}-${index}`} className="min-w-0">
+                      {item.title ? <div className="truncate font-medium text-[#1f2430]">{item.title}</div> : null}
+                      <div className="truncate text-[#667085]">
+                        {linkNote(item.provider) ? `${linkNote(item.provider)} · ` : ""}
+                        {item.url}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ) : null}
 
             <h3 className="mt-6 text-base font-semibold text-[#1f2430]">其它选项</h3>
@@ -873,10 +1285,14 @@ export default function TransferPage() {
             <div className="mt-3 flex items-center gap-3">
               <div className="flex h-12 min-w-0 flex-1 items-center rounded-xl border border-[#e4e7ee] bg-white px-4">
                 <input
-                  value={targetPath}
-                  onChange={(event) => setTargetPath(event.target.value)}
+                  value={usesFileId(account?.provider) ? targetTrail.map((item) => item.name).join(" / ") : targetPath}
+                  readOnly={usesFileId(account?.provider)}
+                  onChange={(event) => {
+                    if (usesFileId(account?.provider)) return;
+                    setTargetPath(event.target.value);
+                  }}
                   aria-label="转存路径"
-                  className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+                  className="min-w-0 flex-1 bg-transparent text-sm outline-none read-only:cursor-default"
                 />
                 <button type="button" aria-label="选择文件夹" onClick={() => setPickerOpen(true)} className="text-[#f97316]">
                   <FolderIcon />
@@ -899,50 +1315,15 @@ export default function TransferPage() {
         <FolderPicker
           accountId={accountId}
           initialPath={targetPath}
+          initialTrail={usesFileId(account?.provider) ? targetTrail : undefined}
           onCancel={() => setPickerOpen(false)}
-          onConfirm={(path) => {
+          onConfirm={(path, nextTrail) => {
             setTargetPath(path);
+            setTargetTrail(nextTrail);
             setPickerOpen(false);
           }}
           onCreated={() => setReloadKey((value) => value + 1)}
         />
-      ) : null}
-      {renameTarget ? (
-        <div className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4" onClick={() => setRenameTarget(null)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="rename-title"
-            className="w-full max-w-md rounded-2xl bg-white p-6 border border-line"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h2 id="rename-title" className="text-lg font-semibold text-[#1f2430]">
-              重命名
-            </h2>
-            <input
-              value={renameValue}
-              onChange={(event) => setRenameValue(event.target.value)}
-              aria-label="新名称"
-              className="mt-4 h-11 w-full rounded-xl border border-[#e4e7ee] px-3 text-sm outline-none"
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void confirmRename();
-              }}
-            />
-            <div className="mt-5 flex justify-end gap-3">
-              <button type="button" onClick={() => setRenameTarget(null)} className="h-10 rounded-xl px-4 text-sm text-[#667085]">
-                取消
-              </button>
-              <button
-                type="button"
-                disabled={busyPath !== null}
-                onClick={() => void confirmRename()}
-                className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
-              >
-                确认
-              </button>
-            </div>
-          </div>
-        </div>
       ) : null}
       {deleteTarget ? (
         <div
@@ -981,6 +1362,81 @@ export default function TransferPage() {
               >
                 {busyPath === deleteTarget.path ? <Spinner light /> : null}
                 {busyPath === deleteTarget.path ? "正在删除" : "删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {batchRenameOpen && batchPlan ? (
+        <div className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4" onClick={() => !batchPending && setBatchRenameOpen(false)}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="batch-rename-title"
+            className="w-full max-w-md rounded-2xl bg-white p-6 border border-line"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="batch-rename-title" className="text-lg font-semibold text-[#1f2430]">
+              批量重命名
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-[#667085]">
+              已选 {renameTargets.length} 项，按创建时间从早到晚编号。数字和原名称之间留一个空格。填写 010 时从 010 递增，最多到 999。
+            </p>
+            <div className="mt-4 flex gap-2">
+              {(
+                [
+                  ["front", "添加到前面"],
+                  ["back", "添加到后面"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={batchPending}
+                  onClick={() => setBatchSide(value)}
+                  className={`h-10 flex-1 rounded-xl border text-sm ${batchSide === value ? "border-ink bg-[#f4f6fb] font-medium text-ink" : "border-[#e4e7ee] text-[#667085]"} disabled:opacity-40`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <label className="mt-4 block text-sm text-[#344054]">
+              开始数字
+              <input
+                value={batchStart}
+                onChange={(event) => {
+                  setBatchStart(event.target.value);
+                  setBatchError("");
+                }}
+                inputMode="numeric"
+                placeholder="010"
+                aria-label="开始数字"
+                disabled={batchPending}
+                className="mt-2 h-11 w-full rounded-xl border border-[#e4e7ee] px-3 font-mono text-sm outline-none disabled:opacity-50"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void submitBatchRename();
+                }}
+              />
+            </label>
+            {batchPlan.ok && batchPlan.rows.length > 0 ? (
+              <p className="mt-3 break-all text-sm text-[#344054]">
+                示例：{batchPlan.rows.slice(0, 2).map((row) => row.name).join("，")}
+              </p>
+            ) : null}
+            {!batchPlan.ok && batchStart.trim() ? <p className="mt-3 text-sm text-danger">{batchPlan.error}</p> : null}
+            {batchError ? <p className="mt-3 text-sm text-danger">{batchError}</p> : null}
+            <div className="mt-5 flex justify-end gap-3">
+              <button type="button" disabled={batchPending} onClick={() => setBatchRenameOpen(false)} className="h-10 rounded-xl px-4 text-sm text-[#667085] disabled:opacity-40">
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={batchPending || !batchPlan.ok}
+                onClick={() => void submitBatchRename()}
+                className="inline-flex h-10 items-center gap-2 rounded-xl bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {batchPending ? <Spinner light /> : null}
+                {batchPending ? "正在重命名" : "开始重命名"}
               </button>
             </div>
           </div>
@@ -1057,6 +1513,87 @@ export default function TransferPage() {
           </Link>
         </div>
       ) : null}
+      {shareOpen ? (
+        <div className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4" onClick={() => !sharePending && setShareOpen(false)}>
+          <div
+            role="dialog"
+            aria-labelledby="share-mode-title"
+            className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="share-mode-title" className="text-base font-semibold text-ink">
+              选择分享方式
+            </h2>
+            <p className="mt-1 text-[13px] text-ink/55">
+              {baiduLocked
+                ? "百度网盘不支持公开链接，已固定为加密链接。只分享当前这一层勾选的项目。"
+                : xunleiQuick
+                  ? "迅雷的公开链接是快速分享。提取码由迅雷自动生成，并写在链接里。只分享当前这一层勾选的项目。"
+                  : "公开链接无需提取码。加密链接会使用你填写的提取码。只分享当前这一层勾选的项目。"}
+            </p>
+            <div className="mt-4 space-y-2 text-sm">
+              <label className={`flex items-center gap-2 ${baiduLocked ? "text-ink/40" : ""}`}>
+                <input
+                  type="radio"
+                  name="share-visibility"
+                  checked={visibility === "public"}
+                  disabled={baiduLocked || xunleiQuick}
+                  onChange={() => chooseVisibility("public")}
+                />
+                公开链接
+              </label>
+              {xunleiQuick ? null : (
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="share-visibility"
+                    checked={visibility === "private"}
+                    disabled={baiduLocked}
+                    onChange={() => chooseVisibility("private")}
+                  />
+                  加密链接
+                </label>
+              )}
+            </div>
+            <label className="mt-4 block text-sm">
+              <span className="font-medium text-ink">有效期</span>
+              <select
+                className="mt-2 h-10 w-full rounded-xl border border-line bg-white px-3"
+                aria-label="有效期"
+                value={period}
+                onChange={(event) => setPeriod(Number(event.target.value))}
+              >
+                <option value={1}>1 天</option>
+                <option value={7}>7 天</option>
+                <option value={30}>30 天</option>
+                <option value={0}>永久</option>
+              </select>
+            </label>
+            {!xunleiQuick && visibility === "private" ? (
+              <label className="mt-4 block text-sm">
+                <span className="font-medium text-ink">提取码</span>
+                <input
+                  className="mt-2 h-10 w-full rounded-xl border border-line bg-white px-3"
+                  value={shareCode}
+                  maxLength={4}
+                  placeholder="4 位字母或数字"
+                  aria-label="提取码"
+                  onChange={(event) => setShareCode(event.target.value)}
+                />
+              </label>
+            ) : null}
+            {shareDialogError ? <p className="alert mt-4">{shareDialogError}</p> : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="btn btn-secondary" disabled={sharePending} onClick={() => setShareOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="btn btn-primary disabled:opacity-50" disabled={sharePending} onClick={() => void submitBatchShare()}>
+                {sharePending ? "正在提交" : "开始分享"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {shareResult ? (
         <div className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4" onClick={() => setShareResult(null)}>
           <div
@@ -1071,8 +1608,12 @@ export default function TransferPage() {
             </h2>
             <p className="mt-4 break-all rounded-xl bg-[#f8f9fc] px-4 py-3 text-sm leading-6 text-[#344054]">
               链接：{shareResult.url}
-              <br />
-              提取码：{shareResult.password}
+              {shareResult.password ? (
+                <>
+                  <br />
+                  提取码：{shareResult.password}
+                </>
+              ) : null}
             </p>
             <div className="mt-5 flex justify-end gap-3">
               <button type="button" onClick={() => setShareResult(null)} className="h-10 rounded-xl px-4 text-sm text-[#667085]">
@@ -1081,7 +1622,8 @@ export default function TransferPage() {
               <button
                 type="button"
                 onClick={() => {
-                  void navigator.clipboard.writeText(`链接：${shareResult.url}\n提取码：${shareResult.password}`).then(() => setCopied(true));
+                  const text = shareResult.password ? `链接：${shareResult.url}\n提取码：${shareResult.password}` : `链接：${shareResult.url}`;
+                  void navigator.clipboard.writeText(text).then(() => setCopied(true));
                 }}
                 className="h-10 rounded-xl bg-[#12b76a] px-4 text-sm font-medium text-white"
               >
@@ -1089,6 +1631,28 @@ export default function TransferPage() {
               </button>
             </div>
           </div>
+        </div>
+      ) : null}
+      {copyTarget && accountId !== null ? (
+        <CopyToPicker
+          accountId={accountId}
+          sourcePath={copyTarget.path}
+          sourceName={copyTarget.name}
+          pending={copyPending}
+          error={copyError}
+          failures={copyFailures}
+          onCancel={() => {
+            if (copyPending) return;
+            setCopyTarget(null);
+            setCopyError("");
+            setCopyFailures([]);
+          }}
+          onConfirm={(targets) => void submitCopyTo(targets)}
+        />
+      ) : null}
+      {toast ? (
+        <div role="status" className="fixed top-5 left-1/2 z-40 -translate-x-1/2 rounded-full bg-[#12b76a] px-4 py-2 text-sm text-white shadow-lg">
+          {toast}
         </div>
       ) : null}
     </div>
