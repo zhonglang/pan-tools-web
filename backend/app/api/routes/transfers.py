@@ -25,6 +25,9 @@ from app.pans.errors import DuplicateName, LoginRejected, NotAFile, PathNotFound
 from app.services.zip_stream import stored_zip_size
 from app.services.quota import QuotaRejected, reserve_transfers
 from app.schemas import (
+    CopyIn,
+    CopyOut,
+    CopyTargetResultOut,
     CreateFolderIn,
     DirEntryOut,
     DownloadTaskOut,
@@ -38,7 +41,8 @@ from app.schemas import (
     ShareOut,
     TransferIn,
 )
-from app.services.transfers import normalize_directory
+from app.services.copying import MAX_RENAME_ATTEMPTS, next_copy_name, validate_targets
+from app.services.transfers import clean_directory_label, normalize_directory
 
 router = APIRouter(tags=["transfers"])
 
@@ -53,7 +57,8 @@ def pan_client(request: Request) -> httpx.Client:
 
 
 def relogin(provider: str) -> str:
-    return "请重新登录夸克" if provider == "quark" else "请重新登录百度"
+    name = {"quark": "夸克", "xunlei": "迅雷"}.get(provider, "百度")
+    return f"请重新登录{name}"
 
 
 def owned_baidu(session: Session, user: User, account_id: int, *, allow_expired: bool = False) -> PanAccount:
@@ -71,7 +76,7 @@ def owned_drive(session: Session, user: User, account_id: int, *, allow_expired:
     account = get_for_user(session, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
-    if account.provider not in {"baidu", "quark"}:
+    if account.provider not in {"baidu", "quark", "xunlei"}:
         raise HTTPException(status_code=422, detail="暂未开放")
     if account.status != "valid" and not allow_expired:
         raise HTTPException(status_code=422, detail=relogin(account.provider))
@@ -94,6 +99,7 @@ def to_job(job: Job, items: list[JobItem]) -> JobOut:
         type=job.type,
         status=job.status,
         directory=job.directory,
+        directory_label=job.directory_label,
         error=job.error,
         items=[
             JobItemOut(
@@ -142,6 +148,7 @@ def list_files(
             path=entry.path,
             is_dir=entry.is_dir,
             size=entry.size,
+            created_at=entry.created_at,
             modified_at=entry.modified_at,
             fs_id=entry.fs_id,
         )
@@ -175,8 +182,11 @@ def create_folder(
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
     adapter = adapter_for(account.provider, pan_client(request))
     try:
-        if account.provider == "quark":
+        if account.provider in {"quark", "xunlei"}:
             created = adapter.create_dir(cookie, directory, path.rsplit("/", 1)[-1])
+            warmed = getattr(adapter, "warmed", None)
+            if isinstance(warmed, str):
+                remember_cookie(session, account, cookie, warmed)
             return DirEntryOut(name=created.name, path=created.path, is_dir=True)
         warmed = adapter.prepare(cookie)
         remember_cookie(session, account, cookie, warmed)
@@ -281,6 +291,65 @@ def delete_file(
     return OkOut()
 
 
+@router.post("/api/accounts/{account_id}/files/copy", response_model=CopyOut)
+def copy_files(
+    account_id: int,
+    body: CopyIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    account = owned_drive(session, user, account_id, allow_expired=True)
+    source = require_child_path(body.path)
+    name = clean_name(body.name)
+    try:
+        targets = validate_targets(source, body.targets)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    adapter, cookie = open_adapter(session, account, request)
+    results: list[CopyTargetResultOut] = []
+    expired = False
+    for dest in targets:
+        if expired:
+            results.append(
+                CopyTargetResultOut(path=dest, name=name, ok=False, error=relogin(account.provider))
+            )
+            continue
+        placed = None
+        error = None
+        for attempt in range(MAX_RENAME_ATTEMPTS):
+            candidate = next_copy_name(name, is_dir=body.is_dir, attempt=attempt)
+            try:
+                adapter.copy(cookie, source, dest, candidate)
+                placed = candidate
+                break
+            except DuplicateName:
+                continue
+            except LoginRejected:
+                expired = True
+                account.status = "expired"
+                account.updated_at = now_utc()
+                session.commit()
+                error = relogin(account.provider)
+                break
+            except PathNotFound:
+                error = "目录不存在"
+                break
+            except TransferFailed:
+                error = "复制失败"
+                break
+        if placed is None and error is None:
+            error = "已有同名文件"
+        results.append(
+            CopyTargetResultOut(path=dest, name=placed or name, ok=placed is not None, error=error)
+        )
+    return CopyOut(
+        succeeded=sum(1 for row in results if row.ok),
+        failed=sum(1 for row in results if not row.ok),
+        results=results,
+    )
+
+
 @router.post("/api/accounts/{account_id}/files/share", response_model=ShareOut)
 def share_file(
     account_id: int,
@@ -290,7 +359,7 @@ def share_file(
     session: Session = Depends(get_db),
 ):
     account = owned_drive(session, user, account_id, allow_expired=True)
-    password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(4))
+    password = "" if account.provider == "quark" else "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(4))
     adapter, cookie = open_adapter(session, account, request)
     try:
         created = adapter.create_share(cookie, body.fs_id, password, path=body.path, name=body.name)
@@ -445,6 +514,7 @@ def create_transfer(
         directory = normalize_directory(body.directory)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    label = clean_directory_label(body.directory_label)
     lines = share_chunks(body.links)
     if not lines:
         raise HTTPException(status_code=422, detail="请粘贴分享链接")
@@ -470,6 +540,7 @@ def create_transfer(
         type="transfer",
         status="pending",
         directory=directory,
+        directory_label=label,
         created_at=moment,
         updated_at=moment,
     )
@@ -481,7 +552,8 @@ def create_transfer(
         if parsed is None:
             status, error = "failed", "链接无法解析"
         elif parsed.provider != account.provider:
-            status, error = "failed", "请使用百度账号" if parsed.provider == "baidu" else "请使用夸克账号" if parsed.provider == "quark" else "暂未开放"
+            names = {"baidu": "请使用百度账号", "quark": "请使用夸克账号", "xunlei": "请使用迅雷账号"}
+            status, error = "failed", names.get(parsed.provider, "链接无法解析")
         else:
             status, error = "pending", None
         item = JobItem(
@@ -511,6 +583,7 @@ def list_jobs(user: User = Depends(get_current_user), session: Session = Depends
                 type=job.type,
                 status=job.status,
                 directory=job.directory,
+                directory_label=job.directory_label,
                 created_at=job.created_at,
                 total=len(items),
                 succeeded=sum(item.status == "succeeded" for item in items),

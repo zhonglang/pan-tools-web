@@ -2,9 +2,21 @@ from app.schemas.account import AccountBindIn, AccountCookieIn, AccountOut, Baid
 from app.schemas.auth import LoginIn, PlanUpdateIn, RegisterIn, UserOut
 from app.schemas.download import DownloadTaskOut
 from app.schemas.job import JobItemOut, JobOut, JobSummaryOut
-from app.schemas.share import ShareBatchIn, ShareTargetIn
+from app.schemas.share import ShareBatchIn, SharePasswordsIn, SharePasswordsOut, ShareTargetIn
 from app.schemas.stats import CreatedSharesOut, MetricOut, RankRowOut, SeriesLineOut, StatsOut
-from app.schemas.transfer import CreateFolderIn, DirEntryOut, FilePathIn, OkOut, RenameIn, ShareIn, ShareOut, TransferIn
+from app.schemas.transfer import (
+    CopyIn,
+    CopyOut,
+    CopyTargetResultOut,
+    CreateFolderIn,
+    DirEntryOut,
+    FilePathIn,
+    OkOut,
+    RenameIn,
+    ShareIn,
+    ShareOut,
+    TransferIn,
+)
 
 __all__ = [
     "AccountBindIn",
@@ -12,6 +24,9 @@ __all__ = [
     "AccountOut",
     "BaiduLoginOut",
     "BaiduLoginStartIn",
+    "CopyIn",
+    "CopyOut",
+    "CopyTargetResultOut",
     "CreateFolderIn",
     "CreatedSharesOut",
     "DirEntryOut",
@@ -31,6 +46,8 @@ __all__ = [
     "ShareBatchIn",
     "ShareIn",
     "ShareOut",
+    "SharePasswordsIn",
+    "SharePasswordsOut",
     "ShareTargetIn",
     "StatsOut",
     "TransferIn",
