@@ -22,11 +22,15 @@ export type DirEntry = {
   path: string;
   is_dir: boolean;
   size: number | null;
+  created_at: number | null;
   modified_at: number | null;
   fs_id: number | null;
 };
 
 export type ShareLink = { url: string; password: string };
+
+export type CopyTargetResult = { path: string; name: string; ok: boolean; error: string | null };
+export type CopyResult = { succeeded: number; failed: number; results: CopyTargetResult[] };
 
 export type JobItem = {
   id: number;
@@ -42,6 +46,7 @@ export type Job = {
   type: string;
   status: string;
   directory: string;
+  directory_label: string | null;
   error: string | null;
   items: JobItem[];
 };
@@ -106,11 +111,42 @@ export type DownloadTask = {
   created_at: string;
 };
 
+export type LibraryItem = {
+  id: number;
+  prefix: string;
+  name: string;
+  xunlei_url: string;
+  quark_url: string;
+  baidu_url: string;
+};
+
+export type LibraryCheckHit = {
+  id: number;
+  prefix: string;
+  name: string;
+  provider: "baidu" | "quark" | "xunlei" | string;
+  reason: string;
+};
+
+export type LibraryCheckResult = {
+  checked: number;
+  invalid: LibraryCheckHit[];
+  unknown: number;
+};
+
+export type LibraryImportResult = {
+  created: number;
+  updated: number;
+  skipped: number;
+  items: LibraryItem[];
+};
+
 export type JobSummary = {
   id: number;
   type: string;
   status: string;
   directory: string;
+  directory_label: string | null;
   created_at: string;
   total: number;
   succeeded: number;
@@ -144,26 +180,16 @@ export const api = {
       body: JSON.stringify({ plan, plan_expires_at: planExpiresAt }),
     }),
   accounts: () => request<PanAccount[]>("/api/accounts"),
-  bindAccount: (provider: string, cookie: string) =>
-    request<PanAccount>("/api/accounts", {
-      method: "POST",
-      body: JSON.stringify({ provider, cookie }),
-    }),
-  updateAccountCookie: (id: number, cookie: string) =>
-    request<PanAccount>(`/api/accounts/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ cookie }),
-    }),
-  startPanLogin: (provider: "baidu" | "quark", accountId?: number) =>
+  startPanLogin: (provider: "baidu" | "quark" | "xunlei", accountId?: number) =>
     request<{ id: string; status: string; nickname: string | null }>(`/api/accounts/${provider}/login`, {
       method: "POST",
       body: JSON.stringify({ account_id: accountId ?? null }),
     }),
-  panLoginStatus: (provider: "baidu" | "quark", id: string) =>
+  panLoginStatus: (provider: "baidu" | "quark" | "xunlei", id: string) =>
     request<{ id: string; status: string; nickname: string | null }>(`/api/accounts/${provider}/login/${id}`),
-  confirmPanLogin: (provider: "baidu" | "quark", id: string) =>
+  confirmPanLogin: (provider: "baidu" | "quark" | "xunlei", id: string) =>
     request<PanAccount>(`/api/accounts/${provider}/login/${id}/confirm`, { method: "POST" }),
-  cancelPanLogin: (provider: "baidu" | "quark", id: string) =>
+  cancelPanLogin: (provider: "baidu" | "quark" | "xunlei", id: string) =>
     request<{ ok: boolean }>(`/api/accounts/${provider}/login/${id}`, { method: "DELETE" }),
   files: (accountId: number, dir: string) =>
     request<DirEntry[]>(`/api/accounts/${accountId}/files?dir=${encodeURIComponent(dir)}`),
@@ -181,6 +207,14 @@ export const api = {
     request<{ ok: boolean }>(`/api/accounts/${accountId}/files/delete`, {
       method: "POST",
       body: JSON.stringify({ path }),
+    }),
+  copyFiles: (
+    accountId: number,
+    body: { path: string; fs_id: number | null; name: string; is_dir: boolean; targets: string[] },
+  ) =>
+    request<CopyResult>(`/api/accounts/${accountId}/files/copy`, {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   shareFile: (accountId: number, body: { fs_id: number | null; path: string; name: string }) =>
     request<ShareLink>(`/api/accounts/${accountId}/files/share`, {
@@ -211,21 +245,47 @@ export const api = {
     anchor.remove();
     window.setTimeout(() => iframe.remove(), 120000);
   },
-  createTransfer: (accountId: number, directory: string, links: string) =>
+  createTransfer: (accountId: number, directory: string, links: string, directoryLabel?: string | null) =>
     request<Job>("/api/transfers", {
       method: "POST",
-      body: JSON.stringify({ account_id: accountId, directory, links }),
+      body: JSON.stringify({ account_id: accountId, directory, directory_label: directoryLabel || null, links }),
     }),
+  sharePasswords: () =>
+    request<{ baidu_password: string | null; quark_password: string | null; xunlei_password: string | null }>(
+      "/api/settings/share-passwords",
+    ),
+  saveSharePasswords: (baiduPassword: string, quarkPassword: string, xunleiPassword: string) =>
+    request<{ baidu_password: string | null; quark_password: string | null; xunlei_password: string | null }>(
+      "/api/settings/share-passwords",
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          baidu_password: baiduPassword.trim() || null,
+          quark_password: quarkPassword.trim() || null,
+          xunlei_password: xunleiPassword.trim() || null,
+        }),
+      },
+    ),
   createShare: (
     accountId: number,
     directory: string,
     targets: { fs_id: number | null; path: string; name: string }[],
     period: number,
+    visibility: "public" | "private",
     password: string | null,
+    directoryLabel?: string | null,
   ) =>
     request<Job>("/api/shares", {
       method: "POST",
-      body: JSON.stringify({ account_id: accountId, directory, targets, period, password }),
+      body: JSON.stringify({
+        account_id: accountId,
+        directory,
+        directory_label: directoryLabel || null,
+        targets,
+        period,
+        visibility,
+        password,
+      }),
     }),
   startDownload: (accountId: number, path: string) =>
     request<DownloadTask>(`/api/accounts/${accountId}/files/save`, {
@@ -246,6 +306,13 @@ export const api = {
     }
     return request<AccountStats>(`/api/stats?${params}`);
   },
+  library: () => request<LibraryItem[]>("/api/library"),
+  checkLibrary: () => request<LibraryCheckResult>("/api/library/check", { method: "POST" }),
+  importLibrary: (rows: { name: string; url: string; password: string }[]) =>
+    request<LibraryImportResult>("/api/library/import", { method: "POST", body: JSON.stringify({ rows }) }),
+  updateLibrary: (id: number, body: Pick<LibraryItem, "name" | "xunlei_url" | "quark_url" | "baidu_url">) =>
+    request<LibraryItem>(`/api/library/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteLibrary: (id: number) => request<{ ok: boolean }>(`/api/library/${id}`, { method: "DELETE" }),
   createdShares: (page: number, pageSize: number, start: string, end: string) => {
     const params = new URLSearchParams({
       page: String(page),
