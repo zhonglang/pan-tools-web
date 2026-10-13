@@ -33,11 +33,13 @@ class QuarkAdapter:
             payload = response.json()
         except Exception as exc:
             raise LoginRejected() from exc
-        data = payload.get("data") if isinstance(payload, dict) else None
-        nickname = data.get("nickname") if isinstance(data, dict) else None
-        if not isinstance(payload, dict) or payload.get("status") != 200 or not isinstance(nickname, str) or not nickname.strip():
+        if not isinstance(payload, dict) or payload.get("status") != 200:
             raise LoginRejected()
-        return nickname.strip()
+        data = payload.get("data")
+        nickname = data.get("nickname") if isinstance(data, dict) else None
+        if isinstance(nickname, str) and nickname.strip():
+            return nickname.strip()
+        return "夸克用户"
 
     def _params(self, extra: dict | None = None) -> dict:
         merged = dict(PARAMS)
@@ -118,16 +120,14 @@ class QuarkAdapter:
             if not isinstance(fid, str) or not fid or not isinstance(name, str):
                 continue
             size = item.get("size")
-            modified = item.get("updated_at")
-            if isinstance(modified, int) and modified >= 10**12:
-                modified = modified // 1000
             entries.append(
                 DirEntry(
                     name=name,
                     path=f"/{fid}",
                     is_dir=item.get("file_type") == 0,
                     size=size if isinstance(size, int) else None,
-                    modified_at=modified if isinstance(modified, int) else None,
+                    created_at=_seconds(item.get("created_at")),
+                    modified_at=_seconds(item.get("updated_at")),
                 )
             )
         return entries
@@ -149,6 +149,28 @@ class QuarkAdapter:
 
     def delete(self, cookie: str, path: str) -> None:
         self._post("/file/delete", cookie, {"action_type": 2, "filelist": [_fid(path)], "exclude_fids": []})
+
+    def copy(self, cookie: str, path: str, dest: str, new_name: str) -> None:
+        existing = self.list_dir(cookie, dest)
+        if any(entry.name == new_name for entry in existing):
+            raise DuplicateName()
+        before = {entry.path for entry in existing}
+        created = self._post(
+            "/file/copy",
+            cookie,
+            {"filelist": [_fid(path)], "to_pdir_fid": _fid(dest), "exclude_fids": []},
+        )
+        data = created.get("data") if isinstance(created.get("data"), dict) else {}
+        task_id = data.get("task_id")
+        if isinstance(task_id, str) and task_id:
+            self._wait_task(cookie, task_id, time.sleep)
+        after = self.list_dir(cookie, dest)
+        newcomers = [entry for entry in after if entry.path not in before]
+        if not newcomers:
+            raise TransferFailed()
+        item = newcomers[0]
+        if item.name != new_name:
+            self.rename(cookie, item.path, new_name)
 
     def transfer_share(
         self,
@@ -263,17 +285,17 @@ class QuarkAdapter:
         fid = _fid(path or "")
         if fid == "0":
             raise TransferFailed()
-        expired_type = {"0": 1, "7": 2, "1": 3}.get(period, 1)
-        created = self._post(
-            "/share",
-            cookie,
-            {
-                "fid_list": [fid],
-                "title": name or "分享",
-                "url_type": 1,
-                "expired_type": expired_type,
-            },
-        )
+        expired_type = {"0": 1, "1": 3, "7": 2, "30": 4}.get(period, 1)
+        code = (password or "").strip()
+        body = {
+            "fid_list": [fid],
+            "title": name or "分享",
+            "url_type": 2 if code else 1,
+            "expired_type": expired_type,
+        }
+        if code:
+            body["passcode"] = code
+        created = self._post("/share", cookie, body)
         task_data = created.get("data") if isinstance(created.get("data"), dict) else {}
         task_id = task_data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
@@ -285,10 +307,13 @@ class QuarkAdapter:
         shared = self._post("/share/password", cookie, {"share_id": share_id})
         data = shared.get("data") if isinstance(shared.get("data"), dict) else {}
         url = data.get("share_url")
-        code = data.get("passcode") or password
-        if not isinstance(url, str) or not url or not isinstance(code, str) or not code:
+        returned = data.get("passcode") if isinstance(data.get("passcode"), str) else ""
+        saved = returned or code
+        if not isinstance(url, str) or not url:
             raise TransferFailed()
-        return url, code
+        if code and not saved:
+            raise TransferFailed()
+        return url, saved if code else ""
 
     def _wait_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> dict:
         for index in range(30):
@@ -342,6 +367,12 @@ def _share_record(item: dict) -> dict:
 def _pwd_id(value: str) -> str:
     matched = re.search(r"pan\.quark\.cn/s/([0-9A-Za-z]+)", value)
     return matched.group(1) if matched is not None else value
+
+
+def _seconds(value: object) -> int | None:
+    if not isinstance(value, int):
+        return None
+    return value // 1000 if value >= 10**12 else value
 
 
 def _fid(directory: str) -> str:

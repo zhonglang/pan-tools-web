@@ -2,12 +2,13 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from app.core.crypto import encrypt_cookie
 from app.models import Job, JobItem, PanAccount, ShareLink, ShareStatSnapshot, User
 from app.pans import adapter_for
-from app.pans.errors import WrongPassword
+from app.pans.errors import DuplicateName, WrongPassword
 from app.services.stats import enqueue_daily_syncs, execute_sync
 from app.services.transfers import execute_job
 
@@ -29,7 +30,7 @@ def test_list_dir_maps_root_and_folder_type():
                 "status": 200,
                 "data": {
                     "list": [
-                        {"fid": "folder-1", "file_name": "电影", "file_type": 0, "size": 0, "updated_at": 1700000000000},
+                        {"fid": "folder-1", "file_name": "电影", "file_type": 0, "size": 0, "created_at": 1600000000000, "updated_at": 1700000000000},
                         {"fid": "file-1", "file_name": "a.mp4", "file_type": 1, "size": 12, "updated_at": 1700000000000},
                     ]
                 },
@@ -38,6 +39,8 @@ def test_list_dir_maps_root_and_folder_type():
 
     rows = adapter_for("quark", client_for(handler)).list_dir(COOKIE, "/")
     assert rows[0].name == "电影" and rows[0].is_dir and rows[0].path == "/folder-1"
+    assert rows[0].created_at == 1600000000
+    assert rows[0].modified_at == 1700000000
     assert rows[1].name == "a.mp4" and rows[1].is_dir is False and rows[1].path == "/file-1"
 
 
@@ -121,7 +124,71 @@ def test_list_share_records_keeps_missing_counts_empty():
     assert records[0]["url"].startswith("https://pan.quark.cn/s/")
 
 
+def test_quark_share_job_accepts_files_inside_a_folder(client):
+    response = client.post("/api/auth/register", json={"email": "quark-share@example.com", "password": "password-123"})
+    assert response.status_code == 201
+    with client.app.state.session_factory() as session:
+        user = session.scalars(select(User).where(User.email == "quark-share@example.com")).one()
+        user.plan = "paid"
+        user.plan_expires_at = NOW + timedelta(days=30)
+        account = PanAccount(
+            user_id=user.id,
+            provider="quark",
+            nickname="夸克",
+            cookie_ciphertext=encrypt_cookie(COOKIE, KEY),
+            status="valid",
+        )
+        session.add(account)
+        session.commit()
+        account_id = account.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["pdir_fid"] == "folder-1"
+        return httpx.Response(
+            200,
+            json={"status": 200, "data": {"list": [{"fid": "file-1", "file_name": "岗位表.xlsx", "file_type": 1}]}},
+        )
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    created = client.post(
+        "/api/shares",
+        json={
+            "account_id": account_id,
+            "directory": "/folder-1",
+            "directory_label": "根目录 / 网盘拉新资源 / 岗位表",
+            "targets": [{"fs_id": None, "path": "/file-1", "name": "岗位表.xlsx"}],
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["directory_label"] == "根目录 / 网盘拉新资源 / 岗位表"
+    public = client.post(
+        "/api/shares",
+        json={
+            "account_id": account_id,
+            "directory": "/",
+            "visibility": "public",
+            "targets": [{"fs_id": None, "path": "/file-1", "name": "岗位表.xlsx"}],
+        },
+    )
+    assert public.status_code == 201
+    with client.app.state.session_factory() as session:
+        item = session.scalars(select(JobItem).where(JobItem.job_id == public.json()["id"])).one()
+        assert json.loads(item.input_text)["password"] == ""
+    rejected = client.post(
+        "/api/shares",
+        json={
+            "account_id": account_id,
+            "directory": "/folder-1",
+            "targets": [{"fs_id": None, "path": "/other-file", "name": "别的文件"}],
+        },
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "只能分享当前目录中的项目"
+
+
 def test_quark_create_share_returns_url_and_password():
+    seen: dict[str, object] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/share/password"):
@@ -132,6 +199,7 @@ def test_quark_create_share_returns_url_and_password():
         if path.endswith("/task"):
             return httpx.Response(200, json={"status": 200, "data": {"status": 2, "share_id": "share-id"}})
         if path.endswith("/share"):
+            seen["body"] = json.loads(request.content)
             return httpx.Response(200, json={"status": 200, "data": {"task_id": "task-1"}})
         raise AssertionError(path)
 
@@ -146,6 +214,111 @@ def test_quark_create_share_returns_url_and_password():
     )
     assert url == "https://pan.quark.cn/s/share1"
     assert password == "abcd"
+    assert seen["body"] == {
+        "fid_list": ["fid-1"],
+        "title": "电影",
+        "url_type": 2,
+        "expired_type": 1,
+        "passcode": "wxyz",
+    }
+
+
+def test_quark_row_share_creates_a_public_link_without_a_password(client):
+    response = client.post("/api/auth/register", json={"email": "quark-row@example.com", "password": "password-123"})
+    assert response.status_code == 201
+    with client.app.state.session_factory() as session:
+        user = session.scalars(select(User).where(User.email == "quark-row@example.com")).one()
+        account = PanAccount(
+            user_id=user.id,
+            provider="quark",
+            nickname="夸克",
+            cookie_ciphertext=encrypt_cookie(COOKIE, KEY),
+            status="valid",
+        )
+        session.add(account)
+        session.commit()
+        account_id = account.id
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/share/password"):
+            return httpx.Response(200, json={"status": 200, "data": {"share_url": "https://pan.quark.cn/s/openrow", "passcode": ""}})
+        if path.endswith("/task"):
+            return httpx.Response(200, json={"status": 200, "data": {"status": 2, "share_id": "share-id"}})
+        if path.endswith("/share"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"status": 200, "data": {"task_id": "task-1"}})
+        raise AssertionError(path)
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    shared = client.post(
+        f"/api/accounts/{account_id}/files/share",
+        json={"fs_id": None, "path": "/file-1", "name": "电影"},
+    )
+    assert shared.status_code == 200
+    assert shared.json() == {"url": "https://pan.quark.cn/s/openrow", "password": ""}
+    assert seen["body"]["url_type"] == 1
+    assert "passcode" not in seen["body"]
+
+
+def test_quark_public_share_omits_the_passcode():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/share/password"):
+            return httpx.Response(200, json={"status": 200, "data": {"share_url": "https://pan.quark.cn/s/open1", "passcode": ""}})
+        if path.endswith("/task"):
+            return httpx.Response(200, json={"status": 200, "data": {"status": 2, "share_id": "share-id"}})
+        if path.endswith("/share"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"status": 200, "data": {"task_id": "task-1"}})
+        raise AssertionError(path)
+
+    url, password = adapter_for("quark", client_for(handler)).create_share(
+        COOKIE,
+        None,
+        "",
+        "0",
+        path="/fid-1",
+        name="电影",
+        sleeper=lambda _seconds: None,
+    )
+    assert url == "https://pan.quark.cn/s/open1"
+    assert password == ""
+    assert seen["body"] == {
+        "fid_list": ["fid-1"],
+        "title": "电影",
+        "url_type": 1,
+        "expired_type": 1,
+    }
+
+
+def test_quark_thirty_day_share_uses_expired_type_four():
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/share/password"):
+            return httpx.Response(200, json={"status": 200, "data": {"share_url": "https://pan.quark.cn/s/month1", "passcode": "abcd"}})
+        if path.endswith("/task"):
+            return httpx.Response(200, json={"status": 200, "data": {"status": 2, "share_id": "share-id"}})
+        if path.endswith("/share"):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"status": 200, "data": {"task_id": "task-1"}})
+        raise AssertionError(path)
+
+    adapter_for("quark", client_for(handler)).create_share(
+        COOKIE,
+        None,
+        "ab12",
+        "30",
+        path="/fid-1",
+        name="电影",
+        sleeper=lambda _seconds: None,
+    )
+    assert seen["body"]["expired_type"] == 4
 
 
 def test_transfer_share_rejects_bad_password():
@@ -225,7 +398,7 @@ def test_quark_login_rejected_marks_account_expired(client):
         assert [item.error for item in items] == ["登录已失效，请重新登录", "登录已失效，请重新登录"]
 
 
-def test_daily_sync_includes_valid_quark_account(client):
+def test_daily_sync_skips_quark_account(client):
     response = client.post("/api/auth/register", json={"email": "quark-sync@example.com", "password": "password-123"})
     assert response.status_code == 201
     with client.app.state.session_factory() as session:
@@ -245,10 +418,13 @@ def test_daily_sync_includes_valid_quark_account(client):
         enqueue_daily_syncs(session, datetime(2026, 9, 22, 16, 5, tzinfo=timezone.utc))
         session.commit()
         jobs = session.scalars(select(Job).where(Job.account_id == account_id, Job.type == "sync")).all()
-        assert len(jobs) == 1
+        assert jobs == []
+    denied = client.post(f"/api/accounts/{account_id}/sync")
+    assert denied.status_code == 422
+    assert denied.json()["detail"] == "只有百度网盘需要同步"
 
 
-def test_quark_sync_writes_nothing_when_a_later_page_fails(client):
+def test_quark_sync_leaves_existing_links_untouched(client):
     response = client.post("/api/auth/register", json={"email": "quark-fail@example.com", "password": "password-123"})
     assert response.status_code == 201
     with client.app.state.session_factory() as session:
@@ -298,15 +474,68 @@ def test_quark_sync_writes_nothing_when_a_later_page_fails(client):
         share_id, job_id = share.id, job.id
 
     def handler(request: httpx.Request) -> httpx.Response:
-        page = int(request.url.params["_page"])
-        if page == 1:
-            return httpx.Response(200, json={"status": 200, "data": {"list": [{"share_id": "s1", "pwd_id": "abc"}] * 50}})
-        return httpx.Response(500, json={"status": 500, "message": "失败"})
+        raise AssertionError(request.url)
 
     client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
     with client.app.state.session_factory() as session:
         execute_sync(session, client.app.state.pan_http_client, session.get(Job, job_id), lambda _seconds: None, NOW)
         session.commit()
-        assert session.get(Job, job_id).status == "failed"
-        assert session.get(ShareLink, share_id).name == "旧分享"
+        stored = session.get(ShareLink, share_id)
+        assert session.get(Job, job_id).status == "succeeded"
+        assert stored.status == "active"
+        assert stored.name == "旧分享"
         assert len(session.scalars(select(ShareStatSnapshot)).all()) == 1
+
+
+def test_quark_copy_posts_filelist_to_parent():
+    calls = {"sort": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/file/sort"):
+            calls["sort"] += 1
+            if calls["sort"] == 1:
+                return httpx.Response(200, json={"status": 200, "data": {"list": []}})
+            return httpx.Response(
+                200,
+                json={
+                    "status": 200,
+                    "data": {
+                        "list": [
+                            {
+                                "fid": "fid-new",
+                                "file_name": "源名",
+                                "file_type": 0,
+                                "created_at": 1600000000000,
+                                "updated_at": 1700000000000,
+                            }
+                        ]
+                    },
+                },
+            )
+        if path.endswith("/file/copy"):
+            body = json.loads(request.content.decode())
+            assert body["filelist"] == ["fid-src"]
+            assert body["to_pdir_fid"] == "fid-dest"
+            return httpx.Response(200, json={"status": 200, "data": {"task_id": "t1"}})
+        if path.endswith("/task"):
+            return httpx.Response(200, json={"status": 200, "data": {"status": 2}})
+        if path.endswith("/file/rename"):
+            body = json.loads(request.content.decode())
+            assert body == {"fid": "fid-new", "file_name": "新名字"}
+            return httpx.Response(200, json={"status": 200, "data": {}})
+        raise AssertionError(path)
+
+    adapter_for("quark", client_for(handler)).copy(COOKIE, "/fid-src", "/fid-dest", "新名字")
+
+
+def test_quark_copy_raises_when_name_exists():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/file/sort")
+        return httpx.Response(
+            200,
+            json={"status": 200, "data": {"list": [{"fid": "x", "file_name": "同名", "file_type": 0}]}},
+        )
+
+    with pytest.raises(DuplicateName):
+        adapter_for("quark", client_for(handler)).copy(COOKIE, "/fid-src", "/fid-dest", "同名")
