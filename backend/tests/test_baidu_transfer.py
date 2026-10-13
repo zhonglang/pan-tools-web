@@ -41,7 +41,7 @@ def test_list_dir_returns_current_level():
     calls, client = scripted([
         ("xpan/file", {"errno": 0, "list": [
             {"server_filename": "片子", "path": "/片子", "isdir": 1},
-            {"server_filename": "说明.txt", "path": "/说明.txt", "isdir": 0, "size": 2048, "server_mtime": 1700000000, "fs_id": 42},
+            {"server_filename": "说明.txt", "path": "/说明.txt", "isdir": 0, "size": 2048, "server_ctime": 1600000000, "server_mtime": 1700000000, "fs_id": 42},
         ]}),
     ])
     entries = BaiduAdapter(client).list_dir(COOKIE, "/")
@@ -50,6 +50,7 @@ def test_list_dir_returns_current_level():
         ("说明.txt", "/说明.txt", False),
     ]
     assert entries[1].size == 2048
+    assert entries[1].created_at == 1600000000
     assert entries[1].modified_at == 1700000000
     assert entries[0].fs_id is None
     assert entries[1].fs_id == 42
@@ -229,6 +230,42 @@ def test_rename_delete_and_share_use_file_manager():
     adapter.delete(COOKIE, "/说明.txt")
     link = adapter.create_share(COOKIE, 42, "ab12")
     assert link == "https://pan.baidu.com/s/1AbCdEf?pwd=ab12"
+
+
+def test_copy_uses_file_manager():
+    from urllib.parse import parse_qs
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "gettemplatevariable" in url:
+            return httpx.Response(200, json={"errno": 0, "result": {"bdstoken": "bd-token"}})
+        form = parse_qs(request.content.decode())
+        if "filemanager" in url and request.url.params["opera"] == "copy":
+            assert json.loads(form["filelist"][0]) == [
+                {"path": "/说明.txt", "dest": "/目标", "newname": "说明.txt"}
+            ]
+            return httpx.Response(200, json={"errno": 0})
+        raise AssertionError(url)
+
+    adapter = BaiduAdapter(httpx.Client(transport=httpx.MockTransport(handler)))
+    adapter.copy(COOKIE, "/说明.txt", "/目标", "说明.txt")
+
+
+def test_copy_duplicate_raises():
+    from urllib.parse import parse_qs
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "gettemplatevariable" in url:
+            return httpx.Response(200, json={"errno": 0, "result": {"bdstoken": "bd-token"}})
+        if "filemanager" in url and request.url.params["opera"] == "copy":
+            parse_qs(request.content.decode())
+            return httpx.Response(200, json={"errno": -33})
+        raise AssertionError(url)
+
+    adapter = BaiduAdapter(httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(DuplicateName):
+        adapter.copy(COOKIE, "/说明.txt", "/目标", "说明.txt")
 
 
 def test_download_url_rejects_a_folder_and_streams_a_file():

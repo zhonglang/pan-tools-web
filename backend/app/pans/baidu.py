@@ -122,6 +122,7 @@ class BaiduAdapter:
                 continue
             size = item.get("size")
             modified = item.get("server_mtime")
+            created = item.get("server_ctime")
             fs_id = item.get("fs_id")
             entries.append(
                 DirEntry(
@@ -129,6 +130,7 @@ class BaiduAdapter:
                     path=path,
                     is_dir=item.get("isdir") == 1,
                     size=size if isinstance(size, int) else None,
+                    created_at=created if isinstance(created, int) else None,
                     modified_at=modified if isinstance(modified, int) else None,
                     fs_id=fs_id if isinstance(fs_id, int) else None,
                 )
@@ -315,6 +317,9 @@ class BaiduAdapter:
 
     def delete(self, cookie: str, path: str) -> None:
         self._manage(cookie, "delete", [path])
+
+    def copy(self, cookie: str, path: str, dest: str, new_name: str) -> None:
+        self._manage(cookie, "copy", [{"path": path, "dest": dest, "newname": new_name}])
 
     def create_share(self, cookie: str, fs_id: int, password: str, period: str = "0", path: str | None = None, name: str | None = None) -> str:
         cookie, bdstoken = self._token_for(cookie)
@@ -524,6 +529,7 @@ class DirEntry:
     path: str
     is_dir: bool
     size: int | None = None
+    created_at: int | None = None
     modified_at: int | None = None
     fs_id: int | None = None
 
