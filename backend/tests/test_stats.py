@@ -4,7 +4,7 @@ import httpx
 from sqlalchemy import select
 
 from app.core.crypto import encrypt_cookie
-from app.models import Job, PanAccount, ShareLink, ShareStatSnapshot, User
+from app.models import AccountStatDay, Job, PanAccount, ShareLink, ShareStatSnapshot, User
 from app.services.stats import apply_share_records, date_bounds, enqueue_daily_syncs, execute_sync, query_created_shares, query_stats, range_bounds
 from tests.test_transfers import COOKIE, KEY
 
@@ -155,6 +155,29 @@ def test_same_day_refresh_updates_the_daily_snapshot(client):
         shots = session.scalars(select(ShareStatSnapshot).where(ShareStatSnapshot.account_id == account_id).order_by(ShareStatSnapshot.taken_at)).all()
         assert len(shots) == 2
         assert shots[1].taken_at.replace(tzinfo=None) == next_day.replace(tzinfo=None)
+
+
+def test_sync_upserts_account_stat_day(client):
+    user_id, account_id = register(client, email="account-day@example.com")
+    first = {"shareId": 31, "shorturl": "1DayA", "typicalPath": "/日表", "ctime": 1_700_000_000, "vCnt": 1, "tCnt": 5, "dCnt": 0}
+    second = {"shareId": 31, "shorturl": "1DayA", "typicalPath": "/日表", "ctime": 1_700_000_000, "vCnt": 2, "tCnt": 8, "dCnt": 1}
+    with client.app.state.session_factory() as session:
+        account = session.get(PanAccount, account_id)
+        apply_share_records(session, account, [first], NOW)
+        session.commit()
+        days = session.scalars(select(AccountStatDay).where(AccountStatDay.account_id == account_id)).all()
+        assert len(days) == 1
+        assert days[0].transfer_total == 5
+        assert days[0].view_total == 1
+        assert days[0].download_total == 0
+        assert days[0].link_total == 1
+        apply_share_records(session, account, [second], NOW + timedelta(hours=3))
+        session.commit()
+        days = session.scalars(select(AccountStatDay).where(AccountStatDay.account_id == account_id)).all()
+        assert len(days) == 1
+        assert days[0].transfer_total == 8
+        assert days[0].view_total == 2
+        assert days[0].download_total == 1
 
 
 def _seed_metrics(session, user_id, account_id):
@@ -341,6 +364,27 @@ def test_transfer_series_is_daily_per_account(client):
     history_by_name = {line["account_name"]: line["values"] for line in history["series"]["lines"]}
     assert history_by_name["甲"] == [None, None, None, None, 1, 6, 9]
     assert history_by_name["乙"] == [None, None, None, None, None, None, 1]
+
+
+def test_daily_sync_skips_quark_and_xunlei(client):
+    user_id, baidu_id = register(client, email="pans-sync@example.com")
+    ready = datetime(2026, 9, 22, 16, 5, tzinfo=timezone.utc)
+    with client.app.state.session_factory() as session:
+        for provider, nickname in (("quark", "夸克"), ("xunlei", "迅雷")):
+            session.add(
+                PanAccount(
+                    user_id=user_id,
+                    provider=provider,
+                    nickname=nickname,
+                    cookie_ciphertext=encrypt_cookie(COOKIE, KEY),
+                    status="valid",
+                )
+            )
+        session.commit()
+        enqueue_daily_syncs(session, ready)
+        session.commit()
+        jobs = session.scalars(select(Job).where(Job.user_id == user_id, Job.type == "sync")).all()
+        assert [job.account_id for job in jobs] == [baidu_id]
 
 
 def test_daily_sync_runs_once_after_five_past_midnight(client):

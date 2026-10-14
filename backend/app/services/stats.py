@@ -6,11 +6,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.crypto import decrypt_cookie
+from app.services.transfers import keep_warmed
 from app.services.membership import can_use_paid_features
-from app.models import Job, PanAccount, ShareLink, ShareStatSnapshot, User
+from app.models import AccountStatDay, Job, PanAccount, ShareLink, ShareStatSnapshot, User
 from app.pans import adapter_for
 from app.pans.errors import LoginRejected, RateLimited, TransferFailed
-from app.services.transfers import EXPIRED, RETRY_DELAYS
+from app.services.transfers import EXPIRED, RETRY_DELAYS, publish
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 PAGE_SIZE = 10
@@ -58,7 +59,7 @@ def enqueue_daily_syncs(session: Session, now: datetime) -> None:
         return
     day_start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     accounts = session.scalars(
-        select(PanAccount).where(PanAccount.provider.in_(("baidu", "quark")), PanAccount.status == "valid")
+        select(PanAccount).where(PanAccount.provider == "baidu", PanAccount.status == "valid")
     ).all()
     for account in accounts:
         user = session.get(User, account.user_id)
@@ -90,7 +91,13 @@ def enqueue_daily_syncs(session: Session, now: datetime) -> None:
 def execute_sync(session: Session, client, job: Job, sleeper, now: datetime) -> None:
     job.status = "running"
     job.updated_at = now
+    publish(session)
     account = session.get(PanAccount, job.account_id)
+    if account is not None and account.provider != "baidu":
+        job.status = "succeeded"
+        job.error = None
+        job.updated_at = now
+        return
     if account is None or account.status != "valid":
         job.status = "failed"
         job.error = EXPIRED
@@ -102,6 +109,7 @@ def execute_sync(session: Session, client, job: Job, sleeper, now: datetime) -> 
     for attempt in range(3):
         try:
             records = adapter.list_share_records(cookie)
+            cookie = keep_warmed(session, account, adapter, cookie)
             break
         except RateLimited:
             if attempt >= 2:
@@ -199,7 +207,35 @@ def apply_share_records(
     active = session.scalars(
         select(ShareLink).where(ShareLink.account_id == account.id, ShareLink.status == "active")
     ).all()
-    _write_daily_snapshots(session, account, active, snapshot_at or now)
+    moment = snapshot_at or now
+    _write_daily_snapshots(session, account, active, moment)
+    _upsert_account_stat_day(session, account, active, moment)
+
+
+def _upsert_account_stat_day(
+    session: Session, account: PanAccount, active: list[ShareLink], now: datetime
+) -> None:
+    moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    stat_date = moment.astimezone(SHANGHAI).date()
+
+    def _sum(field: str) -> int | None:
+        values = [getattr(row, field) for row in active if getattr(row, field) is not None]
+        return sum(values) if values else None
+
+    row = session.scalars(
+        select(AccountStatDay).where(
+            AccountStatDay.account_id == account.id,
+            AccountStatDay.stat_date == stat_date,
+        )
+    ).first()
+    if row is None:
+        row = AccountStatDay(account_id=account.id, stat_date=stat_date)
+        session.add(row)
+    row.transfer_total = _sum("transfer_count")
+    row.view_total = _sum("view_count")
+    row.download_total = _sum("download_count")
+    row.link_total = len(active)
+    row.updated_at = moment
 
 
 def _write_daily_snapshots(session: Session, account: PanAccount, active: list[ShareLink], now: datetime) -> None:
