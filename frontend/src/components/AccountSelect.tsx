@@ -9,6 +9,14 @@ function CheckIcon() {
   );
 }
 
+function ClearIcon() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
+      <path d="M1.5 1.5l5 5M6.5 1.5l-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export default function AccountSelect({
   accounts,
   value,
@@ -59,27 +67,29 @@ export default function AccountSelect({
             setOpen((current) => !current);
           }
         }}
-        className={`flex h-10 cursor-pointer items-center gap-2 rounded-lg border bg-white px-2 ${
+        className={`flex h-10 cursor-pointer items-center gap-2 rounded-full border bg-white px-3 ${
           open ? "border-primary" : "border-line"
         }`}
       >
         {selected ? (
-          <span className="inline-flex h-7 max-w-[12rem] items-center gap-1 rounded-md border border-[#e4e4e7] bg-white px-2 text-sm text-ink">
-            <span className="truncate">{selected.nickname}</span>
-            <button type="button" aria-label="取消选择账号" className="grid h-4 w-4 shrink-0 place-items-center text-ink/45 hover:text-ink" onClick={clear}>
-              ×
-            </button>
-          </span>
+          <span className="min-w-0 flex-1 truncate text-sm text-ink">{selected.nickname}</span>
         ) : (
-          <span className="px-1 text-sm text-ink/35">全部账号</span>
+          <span className="flex-1 text-sm text-ink/35">全部账号</span>
         )}
-        <span className="ml-auto flex shrink-0 items-center pr-1 text-ink/40">
+        <span className="ml-auto flex shrink-0 items-center">
           {selected ? (
-            <button type="button" aria-label="清空账号" className="grid h-5 w-5 place-items-center rounded-full border border-ink/15 text-[12px] leading-none hover:border-ink/30 hover:text-ink" onClick={clear}>
-              ×
+            <button
+              type="button"
+              aria-label="清空账号"
+              className="grid h-[14px] w-[14px] place-items-center rounded-full bg-[#c0c4cc] text-white transition-colors hover:bg-[#909399]"
+              onClick={clear}
+            >
+              <ClearIcon />
             </button>
           ) : (
-            <span aria-hidden="true">▾</span>
+            <span aria-hidden="true" className="text-ink/40">
+              ▾
+            </span>
           )}
         </span>
       </div>

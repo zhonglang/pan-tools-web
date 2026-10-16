@@ -1,25 +1,12 @@
-import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import select
 
-from app.core.crypto import decrypt_cookie
+from app.core.crypto import encrypt_cookie
 from app.models import PanAccount
 
 KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 SECRET = "BDUSS=super-secret-cookie-value"
-
-
-def install_baidu(client, payload=None, status_code=200, text=None, calls=None):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if calls is not None:
-            calls.append(request.headers.get("cookie"))
-        if text is not None:
-            return httpx.Response(status_code, text=text)
-        return httpx.Response(status_code, json=payload)
-
-    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
 
 
 def register(client, email="user@example.com"):
@@ -41,112 +28,32 @@ def grant_paid(client, user_id: int):
     client.post("/api/auth/login", json={"email": "user@example.com", "password": "password-123"})
 
 
-def test_bind_stores_ciphertext_and_hides_cookie(client, caplog):
-    caplog.set_level(logging.DEBUG, logger="app")
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "网盘昵称", "baidu_name": "百度名"})
-    response = client.post("/api/accounts", json={"provider": "baidu", "cookie": f"  {SECRET}  "})
-    assert response.status_code == 201
-    body = response.json()
-    assert set(body) == {"id", "provider", "nickname", "status", "created_at", "updated_at"}
-    assert body["provider"] == "baidu"
-    assert body["nickname"] == "网盘昵称"
-    assert body["status"] == "valid"
-    assert SECRET not in response.text
-    assert SECRET not in caplog.text
-
-    listed = client.get("/api/accounts")
-    assert listed.status_code == 200
-    assert SECRET not in listed.text
-    assert listed.json()[0]["nickname"] == "网盘昵称"
-
+def save_account(client, user_id: int, provider: str, nickname: str, status: str = "valid") -> int:
     with client.app.state.session_factory() as session:
-        saved = session.scalars(select(PanAccount)).one()
-        assert saved.cookie_ciphertext != SECRET
-        assert decrypt_cookie(saved.cookie_ciphertext, KEY) == SECRET
+        account = PanAccount(
+            user_id=user_id,
+            provider=provider,
+            nickname=nickname,
+            cookie_ciphertext=encrypt_cookie(SECRET, KEY),
+            status=status,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        session.add(account)
+        session.commit()
+        session.refresh(account)
+        return account.id
 
 
-def test_bind_rejects_failed_check_without_saving(client):
+def test_paste_cookie_is_rejected(client):
     register(client)
-    install_baidu(client, {"errno": -6})
-    response = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
-    assert response.status_code == 422
-    assert response.json()["detail"] == "请重新登录百度后再粘贴 Cookie"
+    created = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
+    assert created.status_code == 422
+    assert created.json()["detail"] == "请使用扫码登录"
+    updated = client.patch("/api/accounts/1", json={"cookie": SECRET})
+    assert updated.status_code == 422
+    assert updated.json()["detail"] == "请使用扫码登录"
     assert client.get("/api/accounts").json() == []
-
-
-def test_bind_rejects_blank_cookie(client):
-    register(client)
-    response = client.post("/api/accounts", json={"provider": "baidu", "cookie": "   "})
-    assert response.status_code == 422
-    assert response.json()["detail"] == "Cookie 不能为空"
-
-
-def test_xunlei_is_closed(client):
-    register(client)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("closed provider must not send HTTP")
-
-    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = client.post("/api/accounts", json={"provider": "xunlei", "cookie": SECRET})
-    assert response.status_code == 422
-    assert response.json()["detail"] == "暂未开放"
-    assert client.get("/api/accounts").json() == []
-
-
-def test_bind_quark_stores_valid_account(client):
-    register(client)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": 200, "data": {"nickname": "夸克昵称"}})
-
-    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=1"})
-    assert response.status_code == 201
-    body = response.json()
-    assert body["provider"] == "quark"
-    assert body["nickname"] == "夸克昵称"
-    assert body["status"] == "valid"
-    assert "b-user-id=1" not in response.text
-
-
-def test_bind_quark_rejects_bad_cookie(client):
-    register(client)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": 401, "message": "未登录"})
-
-    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=1"})
-    assert response.status_code == 422
-    assert response.json()["detail"] == "请重新登录夸克后再粘贴 Cookie"
-    assert client.get("/api/accounts").json() == []
-
-
-def test_free_user_can_bind_one_baidu_and_one_quark(client):
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "百度账号"})
-    assert client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET}).status_code == 201
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": 200, "data": {"nickname": "夸克账号"}})
-
-    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    first = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=1"})
-    assert first.status_code == 201
-    second = client.post("/api/accounts", json={"provider": "quark", "cookie": "b-user-id=2"})
-    assert second.status_code == 422
-    assert second.json()["detail"] == "免费用户只能绑定 1 个夸克账号"
-    providers = [row["provider"] for row in client.get("/api/accounts").json()]
-    assert providers == ["baidu", "quark"]
-
-
-def test_unknown_provider_is_rejected(client):
-    register(client)
-    response = client.post("/api/accounts", json={"provider": "dropbox", "cookie": SECRET})
-    assert response.status_code == 422
-    assert response.json()["detail"] == "网盘类型无效"
 
 
 def test_guest_cannot_list_accounts(client):
@@ -155,98 +62,48 @@ def test_guest_cannot_list_accounts(client):
     assert response.json()["detail"] == "未登录"
 
 
+def test_free_user_can_keep_one_of_each_drive(client):
+    user = register(client)
+    save_account(client, user["id"], "baidu", "百度账号")
+    save_account(client, user["id"], "quark", "夸克账号")
+    save_account(client, user["id"], "xunlei", "迅雷账号")
+    denied = client.post("/api/accounts/xunlei/login", json={})
+    assert denied.status_code == 422
+    assert denied.json()["detail"] == "免费用户只能绑定 1 个迅雷账号"
+    providers = [row["provider"] for row in client.get("/api/accounts").json()]
+    assert providers == ["baidu", "quark", "xunlei"]
+
+
 def test_free_user_cannot_bind_a_second_valid_account(client):
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "第一个"})
-    assert client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET}).status_code == 201
-    install_baidu(client, {"errno": 0, "netdisk_name": "第二个"})
-    again = client.post("/api/accounts", json={"provider": "baidu", "cookie": "BDUSS=another-secret"})
+    user = register(client)
+    save_account(client, user["id"], "baidu", "第一个")
+    again = client.post("/api/accounts/baidu/login", json={})
     assert again.status_code == 422
     assert again.json()["detail"] == "免费用户只能绑定 1 个百度账号"
     assert len(client.get("/api/accounts").json()) == 1
 
 
 def test_expired_account_does_not_use_a_slot(client):
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "旧账号"})
-    created = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
-    with client.app.state.session_factory() as session:
-        account = session.get(PanAccount, created.json()["id"])
-        account.status = "expired"
-        session.commit()
-    install_baidu(client, {"errno": 0, "netdisk_name": "新账号"})
-    again = client.post("/api/accounts", json={"provider": "baidu", "cookie": "BDUSS=another-secret"})
+    user = register(client)
+    save_account(client, user["id"], "baidu", "旧账号", status="expired")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getqrcode"):
+            return httpx.Response(200, text='{"errno":0,"sign":"sign-1","imgurl":"https://passport.baidu.com/img.png"}')
+        if request.url.path.endswith("/img.png"):
+            return httpx.Response(200, content=b"png", headers={"content-type": "image/png"})
+        raise AssertionError(str(request.url))
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    again = client.post("/api/accounts/baidu/login", json={})
     assert again.status_code == 201
-    assert again.json()["nickname"] == "新账号"
 
 
 def test_paid_user_stops_at_five_accounts(client):
     user = register(client)
     grant_paid(client, user["id"])
     for index in range(5):
-        install_baidu(client, {"errno": 0, "netdisk_name": f"账号{index}"})
-        response = client.post("/api/accounts", json={"provider": "baidu", "cookie": f"BDUSS=secret-{index}"})
-        assert response.status_code == 201
-    install_baidu(client, {"errno": 0, "netdisk_name": "第六个"})
-    denied = client.post("/api/accounts", json={"provider": "baidu", "cookie": "BDUSS=secret-6"})
+        save_account(client, user["id"], "baidu", f"账号{index}")
+    denied = client.post("/api/accounts/baidu/login", json={})
     assert denied.status_code == 422
     assert denied.json()["detail"] == "最多绑定 5 个百度账号"
-
-
-def test_update_cookie_replaces_ciphertext(client):
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "旧昵称"})
-    created = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
-    account_id = created.json()["id"]
-    install_baidu(client, {"errno": 0, "netdisk_name": "新昵称"})
-    updated = client.patch(f"/api/accounts/{account_id}", json={"cookie": "BDUSS=replacement-secret"})
-    assert updated.status_code == 200
-    assert updated.json()["nickname"] == "新昵称"
-    assert updated.json()["status"] == "valid"
-    assert "replacement-secret" not in updated.text
-    with client.app.state.session_factory() as session:
-        saved = session.get(PanAccount, account_id)
-        assert decrypt_cookie(saved.cookie_ciphertext, KEY) == "BDUSS=replacement-secret"
-
-
-def test_update_keeps_the_row_when_check_fails(client):
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "旧昵称"})
-    created = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
-    account_id = created.json()["id"]
-    install_baidu(client, {"errno": -6})
-    failed = client.patch(f"/api/accounts/{account_id}", json={"cookie": "BDUSS=bad-secret"})
-    assert failed.status_code == 422
-    with client.app.state.session_factory() as session:
-        saved = session.get(PanAccount, account_id)
-        assert saved.nickname == "旧昵称"
-        assert decrypt_cookie(saved.cookie_ciphertext, KEY) == SECRET
-
-
-def test_update_of_valid_account_does_not_require_another_slot(client):
-    register(client)
-    install_baidu(client, {"errno": 0, "netdisk_name": "唯一"})
-    created = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
-    install_baidu(client, {"errno": 0, "netdisk_name": "换过"})
-    updated = client.patch(f"/api/accounts/{created.json()['id']}", json={"cookie": "BDUSS=replacement-secret"})
-    assert updated.status_code == 200
-    assert len(client.get("/api/accounts").json()) == 1
-
-
-def test_cannot_update_someone_elses_account(client):
-    register(client, "user@example.com")
-    install_baidu(client, {"errno": 0, "netdisk_name": "用户的"})
-    created = client.post("/api/accounts", json={"provider": "baidu", "cookie": SECRET})
-    client.post("/api/auth/logout")
-    register(client, "other@example.com")
-    install_baidu(client, {"errno": 0, "netdisk_name": "不该发生"})
-    response = client.patch(f"/api/accounts/{created.json()['id']}", json={"cookie": "BDUSS=other-secret"})
-    assert response.status_code == 404
-    assert response.json()["detail"] == "账号不存在"
-
-
-def test_missing_account_is_not_found(client):
-    register(client)
-    response = client.patch("/api/accounts/999", json={"cookie": SECRET})
-    assert response.status_code == 404
-    assert response.json()["detail"] == "账号不存在"

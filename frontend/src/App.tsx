@@ -8,10 +8,11 @@ import AdminUsersPage from "./pages/AdminUsersPage";
 import DownloadsPage from "./pages/DownloadsPage";
 import JobPage from "./pages/JobPage";
 import JobsPage from "./pages/JobsPage";
+import LibraryPage from "./pages/LibraryPage";
 import LoginPage from "./pages/LoginPage";
 import ProfilePage from "./pages/ProfilePage";
 import RegisterPage from "./pages/RegisterPage";
-import SharePage from "./pages/SharePage";
+import SettingsPage from "./pages/SettingsPage";
 import StatsPage from "./pages/StatsPage";
 import TransferPage from "./pages/TransferPage";
 
@@ -70,19 +71,20 @@ export default function App() {
         element={
           user ? (
             <AppShell user={user} onLogout={onLogout}>
-              <TransferPage />
+              <TransferPage user={user} />
             </AppShell>
           ) : (
             <Navigate to="/login" />
           )
         }
       />
+      <Route path="/share" element={<Navigate to="/transfer" replace />} />
       <Route
-        path="/share"
+        path="/library"
         element={
           user ? (
             <AppShell user={user} onLogout={onLogout}>
-              <SharePage user={user} />
+              <LibraryPage />
             </AppShell>
           ) : (
             <Navigate to="/login" />
@@ -143,6 +145,18 @@ export default function App() {
           user?.role === "admin" ? (
             <AppShell user={user} onLogout={onLogout}>
               <AdminUsersPage />
+            </AppShell>
+          ) : (
+            <Navigate to="/login" />
+          )
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          user ? (
+            <AppShell user={user} onLogout={onLogout}>
+              <SettingsPage />
             </AppShell>
           ) : (
             <Navigate to="/login" />

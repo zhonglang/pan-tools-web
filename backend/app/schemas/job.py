@@ -17,6 +17,7 @@ class JobOut(BaseModel):
     type: str
     status: str
     directory: str
+    directory_label: str | None = None
     error: str | None = None
     items: list[JobItemOut]
 
@@ -26,6 +27,7 @@ class JobSummaryOut(BaseModel):
     type: str
     status: str
     directory: str
+    directory_label: str | None = None
     created_at: datetime
     total: int
     succeeded: int

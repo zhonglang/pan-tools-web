@@ -19,8 +19,8 @@ from app.pans.errors import LoginRejected, PathNotFound
 from app.services.quota import PaidRequired, reserve_shares
 from app.api.routes.transfers import owned_drive, pan_client, relogin, to_job
 from app.schemas import JobOut, ShareBatchIn
-from app.services.shares import shares_csv
-from app.services.transfers import normalize_directory
+from app.services.shares import shares_xlsx
+from app.services.transfers import clean_directory_label, normalize_directory
 
 router = APIRouter()
 _PASSWORD = string.ascii_letters + string.digits
@@ -30,6 +30,14 @@ PAID_ONLY = "该功能仅对付费会员开放"
 def _parent(path: str) -> str:
     parent = path.rsplit("/", 1)[0]
     return parent or "/"
+
+
+def _in_current_directory(provider: str, directory: str, path: str, listed: set[str] | None) -> bool:
+    if ".." in path.split("/"):
+        return False
+    if provider in {"quark", "xunlei"} and directory != "/":
+        return listed is not None and path in listed
+    return _parent(path) == directory
 
 
 def _password(shared: str | None) -> str:
@@ -52,21 +60,27 @@ def create_share_job(
         directory = normalize_directory(body.directory)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if body.period not in {0, 1, 7}:
+    label = clean_directory_label(body.directory_label)
+    if body.period not in {0, 1, 7, 30}:
         raise HTTPException(status_code=422, detail="有效期无效")
-    shared = (body.password or "").strip() or None
-    if shared is not None and (len(shared) != 4 or any(char not in _PASSWORD for char in shared)):
-        raise HTTPException(status_code=422, detail="提取码需要 4 位字母或数字")
+    if body.visibility == "public" and account.provider == "baidu":
+        raise HTTPException(status_code=422, detail="百度网盘不支持公开链接")
+    if account.provider == "xunlei" or body.visibility == "public":
+        item_password = ""
+    else:
+        shared = (body.password or "").strip() or None
+        if shared is not None and (len(shared) != 4 or any(char not in _PASSWORD for char in shared)):
+            raise HTTPException(status_code=422, detail="提取码需要 4 位字母或数字")
+        item_password = _password(shared)
     if not body.targets:
         raise HTTPException(status_code=422, detail="请选择要分享的文件")
-    for target in body.targets:
-        if ".." in target.path.split("/") or _parent(target.path) != directory:
-            raise HTTPException(status_code=422, detail="只能分享当前目录中的项目")
     moment = now_utc()
+    listed: set[str] | None = None
     if directory != "/":
         cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
         try:
-            adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
+            rows = adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
+            listed = {row.path for row in rows}
         except LoginRejected as exc:
             account.status = "expired"
             account.updated_at = moment
@@ -74,6 +88,9 @@ def create_share_job(
             raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
         except PathNotFound as exc:
             raise HTTPException(status_code=422, detail="目标目录不存在") from exc
+    for target in body.targets:
+        if not _in_current_directory(account.provider, directory, target.path, listed):
+            raise HTTPException(status_code=422, detail="只能分享当前目录中的项目")
     try:
         reserve_shares(session, user, moment, len(body.targets))
     except PaidRequired as exc:
@@ -84,6 +101,7 @@ def create_share_job(
         type="share",
         status="pending",
         directory=directory,
+        directory_label=label,
         created_at=moment,
         updated_at=moment,
     )
@@ -98,7 +116,7 @@ def create_share_job(
                     "fs_id": target.fs_id,
                     "path": target.path,
                     "name": target.name,
-                    "password": _password(shared),
+                    "password": item_password,
                     "period": str(body.period),
                 },
                 ensure_ascii=False,
@@ -130,7 +148,7 @@ def export_share_job(
         raise HTTPException(status_code=422, detail="这个任务不能导出")
     rows = list_for_job(session, job.id, status="active")
     return Response(
-        content=shares_csv(rows),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="shares-{job.id}.csv"'},
+        content=shares_xlsx(rows),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="shares-{job.id}.xlsx"'},
     )

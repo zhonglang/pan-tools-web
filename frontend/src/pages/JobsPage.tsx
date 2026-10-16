@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type JobSummary } from "../api";
+import ClearableSelect from "../components/ClearableSelect";
 import PageHeader from "../components/PageHeader";
 import TableLoading from "../components/TableLoading";
 import TablePager, { PAGE_SIZE, pageOf } from "../components/TablePager";
@@ -17,6 +18,11 @@ const typeName: Record<string, string> = {
   share: "分享",
   sync: "同步",
 };
+
+function directoryText(job: JobSummary) {
+  if (job.type === "sync" && job.directory === "daily-close") return "凌晨同步";
+  return job.directory_label || job.directory;
+}
 
 function taskStatus(job: JobSummary) {
   if (job.status === "running") {
@@ -51,27 +57,45 @@ function statusClass(status: string) {
 export default function JobsPage() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [error, setError] = useState("");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    api
-      .jobs()
-      .then(setJobs)
-      .catch((caught: Error) => setError(caught.message))
-      .finally(() => setLoaded(true));
+    let stopped = false;
+    let timer = 0;
+    async function load() {
+      try {
+        const rows = await api.jobs();
+        if (stopped) return;
+        setJobs(rows);
+        setError("");
+        if (rows.some((job) => job.status === "pending" || job.status === "running")) {
+          timer = window.setTimeout(load, 2000);
+        }
+      } catch (caught) {
+        if (!stopped) setError(caught instanceof Error ? caught.message : "任务读取失败");
+      } finally {
+        if (!stopped) setLoaded(true);
+      }
+    }
+    void load();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   const visible = useMemo(() => {
     const query = keyword.trim().toLowerCase();
     return jobs.filter((job) => {
-      if (typeFilter !== "all" && job.type !== typeFilter) return false;
-      if (statusFilter !== "all" && job.status !== statusFilter) return false;
-      if (query && !job.directory.toLowerCase().includes(query)) return false;
+      if (typeFilter != null && job.type !== typeFilter) return false;
+      if (statusFilter != null && job.status !== statusFilter) return false;
+      const folder = directoryText(job).toLowerCase();
+      if (query && !folder.includes(query) && !job.directory.toLowerCase().includes(query)) return false;
       return true;
     });
   }, [jobs, keyword, statusFilter, typeFilter]);
@@ -84,25 +108,35 @@ export default function JobsPage() {
 
   return (
     <div>
-      <PageHeader title="任务" description="转存、分享和同步都会出现在这里。点「详情」查看结果。" />
+      <PageHeader title="执行记录" description="转存、分享和同步都会出现在这里。点「详情」查看结果。" />
       {error ? <p className="alert mb-4">{error}</p> : null}
-      <div className="mb-4 flex flex-wrap gap-3">
-        <select className="h-10 rounded-xl border border-line bg-white px-3 text-sm" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} aria-label="按类型筛选">
-          <option value="all">全部类型</option>
-          <option value="transfer">转存</option>
-          <option value="share">分享</option>
-          <option value="sync">同步</option>
-        </select>
-        <select className="h-10 rounded-xl border border-line bg-white px-3 text-sm" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="按状态筛选">
-          <option value="all">全部状态</option>
-          <option value="pending">等待执行</option>
-          <option value="running">正在执行</option>
-          <option value="succeeded">全部成功</option>
-          <option value="partial">部分成功</option>
-          <option value="failed">全部失败</option>
-        </select>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <ClearableSelect
+          options={[
+            { value: "transfer", label: "转存" },
+            { value: "share", label: "分享" },
+            { value: "sync", label: "同步" },
+          ]}
+          value={typeFilter}
+          onChange={setTypeFilter}
+          placeholder="全部类型"
+          ariaLabel="按类型筛选"
+        />
+        <ClearableSelect
+          options={[
+            { value: "pending", label: "等待执行" },
+            { value: "running", label: "正在执行" },
+            { value: "succeeded", label: "全部成功" },
+            { value: "partial", label: "部分成功" },
+            { value: "failed", label: "全部失败" },
+          ]}
+          value={statusFilter}
+          onChange={setStatusFilter}
+          placeholder="全部状态"
+          ariaLabel="按状态筛选"
+        />
         <input
-          className="h-10 min-w-48 rounded-xl border border-line bg-white px-3 text-sm"
+          className="h-10 min-w-48 rounded-full border border-line bg-white px-3 text-sm"
           value={keyword}
           placeholder="筛选目录"
           aria-label="按目录筛选"
@@ -151,7 +185,7 @@ export default function JobsPage() {
                   </td>
                   <td className="max-w-xs truncate px-4 py-3">
                     <Link to={`/jobs/${job.id}`} className="text-ink hover:text-primary-dark">
-                      {job.type === "sync" && job.directory === "daily-close" ? "凌晨同步" : job.directory}
+                      {directoryText(job)}
                     </Link>
                   </td>
                   <td className="px-4 py-3">{job.total}</td>
@@ -161,6 +195,11 @@ export default function JobsPage() {
                     <Link to={`/jobs/${job.id}`} className="font-medium text-primary-dark hover:underline">
                       详情
                     </Link>
+                    {job.type === "share" && (job.status === "succeeded" || job.status === "partial") ? (
+                      <a href={`/api/jobs/${job.id}/export`} className="ml-3 font-medium text-primary-dark hover:underline">
+                        导出 Excel
+                      </a>
+                    ) : null}
                   </td>
                 </tr>
               ))}

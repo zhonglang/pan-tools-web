@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import time
@@ -39,6 +40,7 @@ ALGORITHMS = (
 _TOKEN_ERRORS = {10, 16, 4121, 4122}
 _PENDING = {"authorization_pending", "slow_down"}
 _EXPIRED = {"expired_token", "access_denied"}
+_ACCESS_SKEW_SECONDS = 120
 
 
 class XunleiAdapter:
@@ -46,13 +48,17 @@ class XunleiAdapter:
         self.client = client
         self.warmed: str | None = None
 
+    def _creds(self, cookie: str) -> dict:
+        source = self.warmed if isinstance(self.warmed, str) and self.warmed else cookie
+        return _loads(source)
+
     def prepare(self, cookie: str) -> str:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         return self._remember(credential)
 
     def verify_login(self, cookie: str) -> str:
         try:
-            credential = self._live(_loads(cookie), action="GET:/v1/user/me")
+            credential = self._live(self._creds(cookie), action="GET:/v1/user/me")
             payload = self._send("GET", f"{AUTH}/user/me", credential, action="GET:/v1/user/me")
         except TransferFailed as exc:
             raise LoginRejected() from exc
@@ -63,7 +69,7 @@ class XunleiAdapter:
         return "迅雷用户"
 
     def list_dir(self, cookie: str, directory: str) -> list[DirEntry]:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         parent = _fid(directory)
         entries: list[DirEntry] = []
         page = ""
@@ -92,7 +98,7 @@ class XunleiAdapter:
         raise TransferFailed()
 
     def create_dir(self, cookie: str, directory: str, name: str) -> DirEntry:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         payload = self._send(
             "POST",
             f"{API}/files",
@@ -106,28 +112,45 @@ class XunleiAdapter:
         return DirEntry(name=name, path=f"/{fid}", is_dir=True)
 
     def rename(self, cookie: str, path: str, new_name: str) -> None:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         self._send("PATCH", f"{API}/files/{_fid(path)}", credential, body={"name": new_name})
 
     def delete(self, cookie: str, path: str) -> None:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         self._send("PATCH", f"{API}/files/{_fid(path)}/trash", credential, body={})
 
-    def copy(self, cookie: str, path: str, dest: str, new_name: str) -> None:
+    def copy(
+        self,
+        cookie: str,
+        path: str,
+        dest: str,
+        new_name: str,
+        *,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        wait = sleeper or time.sleep
         existing = self.list_dir(cookie, dest)
         if any(entry.name == new_name for entry in existing):
             raise DuplicateName()
         before = {entry.path for entry in existing}
-        credential = self._live(_loads(cookie))
-        self._send(
+        credential = self._live(self._creds(cookie))
+        payload = self._send(
             "POST",
-            f"{API}/files/copy",
+            f"{API}/files:batchCopy",
             credential,
-            body={"file_ids": [_fid(path)], "to": {"parent_id": _fid(dest)}},
-            action="POST:/drive/v1/files/copy",
+            body={"ids": [_fid(path)], "to": {"parent_id": _fid(dest)}},
+            action="POST:/drive/v1/files:batchCopy",
         )
-        after = self.list_dir(cookie, dest)
-        newcomers = [entry for entry in after if entry.path not in before]
+        task_id = payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
+        if task_id:
+            self._wait_drive_task(cookie, task_id, wait)
+        newcomers: list[DirEntry] = []
+        for _ in range(20):
+            after = self.list_dir(cookie, dest)
+            newcomers = [entry for entry in after if entry.path not in before]
+            if newcomers:
+                break
+            wait(0.5)
         if not newcomers:
             raise TransferFailed()
         item = newcomers[0]
@@ -143,7 +166,7 @@ class XunleiAdapter:
         *,
         sleeper: Callable[[float], None] | None = None,
     ) -> None:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         share_id = _share_id(surl)
         detail = self._send(
             "GET",
@@ -174,7 +197,7 @@ class XunleiAdapter:
         )
 
     def open_download(self, cookie: str, path: str):
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         payload = self._send("GET", f"{API}/files/{_fid(path)}", credential)
         url = payload.get("web_content_link")
         if not isinstance(url, str) or not url:
@@ -195,7 +218,7 @@ class XunleiAdapter:
         return DownloadStream(chunks(), size)
 
     def list_share_records(self, cookie: str) -> list[dict]:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         records: list[dict] = []
         page = ""
         for _ in range(100):
@@ -229,7 +252,7 @@ class XunleiAdapter:
         *,
         sleeper: Callable[[float], None] | None = None,
     ) -> tuple[str, str]:
-        credential = self._live(_loads(cookie))
+        credential = self._live(self._creds(cookie))
         fid = _fid(path or "")
         if not fid:
             raise TransferFailed()
@@ -255,6 +278,8 @@ class XunleiAdapter:
         return f"{base}?pwd={code}#", code
 
     def _live(self, credential: dict, *, action: str = "GET:/drive/v1/files") -> dict:
+        if _access_expiring(credential):
+            return self._refresh(credential)
         if credential.get("captcha_token"):
             self._remember(credential)
             return credential
@@ -315,14 +340,41 @@ class XunleiAdapter:
             body,
             authorized=False,
         )
-        access = payload.get("access_token")
-        refresh = payload.get("refresh_token")
-        if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh:
-            raise LoginRejected()
-        credential["access_token"] = access
-        credential["refresh_token"] = refresh
-        credential["captcha_token"] = ""
+        _apply_tokens(credential, payload)
         return self._captcha(credential, "GET:/drive/v1/files")
+
+    def _wait_drive_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> None:
+        # Task payloads include a human message like "已添加"; do not route through _send,
+        # which treats any non-empty "message" as an API error.
+        credential = self._live(self._creds(cookie))
+        url = f"{API}/tasks/{task_id}"
+        action = f"GET:/drive/v1/tasks/{task_id}"
+        for _ in range(40):
+            try:
+                response = self.client.get(url, headers=self._headers(credential), timeout=20)
+            except Exception as exc:
+                raise TransferFailed() from exc
+            if response.status_code == 429:
+                raise RateLimited()
+            payload = _json_body(response)
+            code = _error_code(payload)
+            if response.status_code == 401 or code in _TOKEN_ERRORS:
+                credential = self._refresh(credential)
+                continue
+            if code == 9:
+                credential["captcha_token"] = ""
+                credential = self._captcha(credential, action)
+                continue
+            if response.status_code >= 400:
+                raise TransferFailed()
+            phase = payload.get("phase")
+            if phase == "PHASE_TYPE_COMPLETE":
+                self._remember(credential)
+                return
+            if phase == "PHASE_TYPE_ERROR":
+                raise TransferFailed()
+            sleeper(0.5)
+        raise TransferFailed()
 
     def _send(
         self,
@@ -415,6 +467,49 @@ def _loads(cookie: str) -> dict:
         if not isinstance(payload.get(key), str) or not payload[key]:
             raise LoginRejected()
     return payload
+
+
+def _jwt_exp(access_token: str | None) -> int | None:
+    if not isinstance(access_token, str):
+        return None
+    parts = access_token.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded.encode()))
+    except Exception:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    exp = claims.get("exp")
+    return int(exp) if isinstance(exp, (int, float)) else None
+
+
+def _access_expiring(credential: dict, *, skew: int = _ACCESS_SKEW_SECONDS) -> bool:
+    exp = credential.get("expires_at")
+    if not isinstance(exp, (int, float)):
+        exp = _jwt_exp(credential.get("access_token") if isinstance(credential.get("access_token"), str) else None)
+    if not isinstance(exp, (int, float)):
+        return False
+    return time.time() >= float(exp) - skew
+
+
+def _apply_tokens(credential: dict, payload: dict) -> None:
+    access = payload.get("access_token")
+    refresh = payload.get("refresh_token")
+    if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh:
+        raise LoginRejected()
+    credential["access_token"] = access
+    credential["refresh_token"] = refresh
+    credential["captcha_token"] = ""
+    expires_in = payload.get("expires_in")
+    if isinstance(expires_in, (int, float)) and expires_in > 0:
+        credential["expires_at"] = int(time.time()) + int(expires_in)
+        return
+    exp = _jwt_exp(access)
+    if exp is not None:
+        credential["expires_at"] = exp
 
 
 def _captcha_sign(device_id: str, timestamp: str) -> str:

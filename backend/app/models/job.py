@@ -15,6 +15,7 @@ class Job(Base):
     type: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), default="pending")
     directory: Mapped[str] = mapped_column(String(1024))
+    directory_label: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

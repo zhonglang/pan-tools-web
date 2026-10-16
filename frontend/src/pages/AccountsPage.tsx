@@ -10,12 +10,13 @@ function statusName(status: string) {
   return status;
 }
 
-function loginHint(provider: "baidu" | "quark", status: string, nickname: string | null) {
-  const name = provider === "quark" ? "夸克" : "百度";
+function loginHint(provider: "baidu" | "quark" | "xunlei", status: string, nickname: string | null) {
+  const name = providerName[provider];
   if (status === "scanned") return "扫码成功，请在手机上点确认";
   if (status === "ready") return `已登录「${nickname ?? `${name}账号`}」`;
   if (status === "expired") return "二维码已过期，请重新发起";
   if (provider === "quark") return "打开夸克 App 扫码登录";
+  if (provider === "xunlei") return "打开迅雷 App 扫码登录";
   return "打开百度网盘 App，点首页右上角「扫一扫」";
 }
 
@@ -25,7 +26,7 @@ function PanLoginDialog({
   onClose,
   onDone,
 }: {
-  provider: "baidu" | "quark";
+  provider: "baidu" | "quark" | "xunlei";
   accountId?: number;
   onClose: () => void;
   onDone: () => void;
@@ -104,21 +105,25 @@ function PanLoginDialog({
         onClick={(event) => event.stopPropagation()}
       >
         <h2 id="pan-login-title" className="text-xl font-semibold">
-          {provider === "quark" ? "登录夸克网盘" : "登录百度网盘"}
+          {provider === "quark" ? "登录夸克网盘" : provider === "xunlei" ? "登录迅雷云盘" : "登录百度网盘"}
         </h2>
         <p className="mt-2 text-sm leading-6 text-ink/65">{loginHint(provider, status, nickname)}</p>
         {sessionId && status !== "ready" && status !== "expired" ? (
           <div className="mx-auto mt-6 w-fit rounded-2xl border border-line bg-white p-4">
             <img
               src={`/api/accounts/${provider}/login/${sessionId}/qrcode`}
-              alt={provider === "quark" ? "夸克登录二维码" : "百度登录二维码"}
+              alt={provider === "quark" ? "夸克登录二维码" : provider === "xunlei" ? "迅雷登录二维码" : "百度登录二维码"}
               className="h-56 w-56 bg-white object-contain"
             />
           </div>
         ) : null}
         {status === "waiting" ? (
           <p className="mt-4 text-sm leading-6 text-ink/65">
-            请用百度网盘 App 首页右上角的扫一扫。如果提示「不支持在网盘内访问」，回到网盘首页，用右上角扫一扫再扫一次。
+            {provider === "quark"
+              ? "请用夸克 App 的扫一扫。扫码后在手机上确认，再回到这里点确认绑定。"
+              : provider === "xunlei"
+                ? "请用迅雷 App 的扫一扫。扫码后在手机上确认，再回到这里点确认绑定。"
+                : "请用百度网盘 App 首页右上角的扫一扫。如果提示「不支持在网盘内访问」，回到网盘首页，用右上角扫一扫再扫一次。"}
           </p>
         ) : null}
         {error ? <p className="alert mt-4">{error}</p> : null}
@@ -144,10 +149,7 @@ export default function AccountsPage() {
   const [accounts, setAccounts] = useState<PanAccount[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
-  const [loginFor, setLoginFor] = useState<{ provider: "baidu" | "quark"; accountId?: number } | null>(null);
-  const [cookieProvider, setCookieProvider] = useState<"baidu" | "quark">("baidu");
-  const [cookie, setCookie] = useState("");
-  const [cookiePending, setCookiePending] = useState(false);
+  const [loginFor, setLoginFor] = useState<{ provider: "baidu" | "quark" | "xunlei"; accountId?: number } | null>(null);
 
   async function load() {
     setAccounts(await api.accounts());
@@ -163,7 +165,7 @@ export default function AccountsPage() {
     <div className="mx-auto max-w-3xl">
       <PageHeader
         title="网盘账号"
-        description="点击绑定后扫码登录。登录成功并确认后，才会保存这个账号。也可以粘贴自己的 Cookie。"
+        description="点击绑定后扫码登录。登录成功并确认后，才会保存这个账号。"
       />
 
       <section className="rounded-2xl border border-line bg-white p-6">
@@ -176,47 +178,10 @@ export default function AccountsPage() {
           <button type="button" onClick={() => setLoginFor({ provider: "quark" })} className="btn btn-secondary">
             绑定夸克
           </button>
-          <button type="button" disabled className="btn btn-secondary">
-            迅雷 · 暂未开放
+          <button type="button" onClick={() => setLoginFor({ provider: "xunlei" })} className="btn btn-secondary">
+            绑定迅雷
           </button>
         </div>
-        <form
-          className="mt-5 grid gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            setCookiePending(true);
-            setError("");
-            api
-              .bindAccount(cookieProvider, cookie)
-              .then(() => {
-                setCookie("");
-                return load();
-              })
-              .catch((caught: Error) => setError(caught.message))
-              .finally(() => setCookiePending(false));
-          }}
-        >
-          <label className="text-sm text-ink/70">
-            粘贴 Cookie
-            <select
-              value={cookieProvider}
-              onChange={(event) => setCookieProvider(event.target.value as "baidu" | "quark")}
-              className="mt-1 block rounded-xl border border-line bg-white px-3 py-2"
-            >
-              <option value="baidu">百度</option>
-              <option value="quark">夸克</option>
-            </select>
-          </label>
-          <textarea
-            value={cookie}
-            onChange={(event) => setCookie(event.target.value)}
-            placeholder="只在这里粘贴，页面不会再显示它"
-            className="min-h-20 rounded-xl border border-line px-3 py-2 text-sm"
-          />
-          <button type="submit" disabled={cookiePending || !cookie.trim()} className="btn btn-secondary w-fit">
-            {cookiePending ? "正在绑定" : "保存 Cookie"}
-          </button>
-        </form>
       </section>
 
       {error ? <p className="alert mt-4">{error}</p> : null}
@@ -235,10 +200,15 @@ export default function AccountsPage() {
               </div>
               <span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold text-ink">{statusName(account.status)}</span>
             </div>
-            {account.provider === "baidu" || account.provider === "quark" ? (
+            {account.provider === "baidu" || account.provider === "quark" || account.provider === "xunlei" ? (
               <button
                 type="button"
-                onClick={() => setLoginFor({ provider: account.provider === "quark" ? "quark" : "baidu", accountId: account.id })}
+                onClick={() =>
+                  setLoginFor({
+                    provider: account.provider === "quark" ? "quark" : account.provider === "xunlei" ? "xunlei" : "baidu",
+                    accountId: account.id,
+                  })
+                }
                 className="btn btn-secondary mt-4"
               >
                 重新登录

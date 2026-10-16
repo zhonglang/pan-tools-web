@@ -21,10 +21,11 @@ export function shiftDate(iso: string, days: number) {
 }
 
 export function shortcutRange(kind: "today" | "week" | "month") {
+  // 区间不含开始日统计，快捷范围多含一天作为基线：今天→昨日起，周/月同理前推一天
   const end = shanghaiToday();
-  if (kind === "week") return { start: shiftDate(end, -6), end };
-  if (kind === "month") return { start: shiftDate(end, -29), end };
-  return { start: end, end };
+  if (kind === "week") return { start: shiftDate(end, -7), end };
+  if (kind === "month") return { start: shiftDate(end, -30), end };
+  return { start: shiftDate(end, -1), end };
 }
 
 function addMonths(cursor: string, amount: number) {
@@ -153,9 +154,10 @@ export default function DateRangePicker({
   }, [open]);
 
   function openPanel() {
-    setCursor(start.slice(0, 7));
-    setDraftStart(start);
-    setDraftEnd(end);
+    const fallback = start && end ? { start, end } : shortcutRange("week");
+    setCursor(fallback.start.slice(0, 7));
+    setDraftStart(fallback.start);
+    setDraftEnd(fallback.end);
     setAwaitingEnd(false);
     setHover(null);
     setOpen(true);
@@ -198,11 +200,17 @@ export default function DateRangePicker({
           open ? "border-primary" : "border-line"
         }`}
       >
-        <span>{start}</span>
-        <span className="text-ink/35" aria-hidden="true">
-          →
-        </span>
-        <span>{end}</span>
+        {start && end ? (
+          <>
+            <span>{start}</span>
+            <span className="text-ink/35" aria-hidden="true">
+              →
+            </span>
+            <span>{end}</span>
+          </>
+        ) : (
+          <span className="text-ink/45">选择日期范围</span>
+        )}
         <span className="text-primary">
           <CalendarIcon />
         </span>

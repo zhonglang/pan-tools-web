@@ -15,6 +15,7 @@ export type PanAccount = {
   status: string;
   created_at: string;
   updated_at: string;
+  last_synced_at?: string | null;
 };
 
 export type DirEntry = {
@@ -60,6 +61,7 @@ export type RankRow = {
   created_at: string;
   views: number | null;
   transfers: number | null;
+  transfer_delta?: number | null;
   downloads: number | null;
 };
 
@@ -67,13 +69,7 @@ export type TransferLine = {
   account_id: number;
   account_name: string;
   values: Array<number | null>;
-};
-
-export type CreatedShares = {
-  page: number;
-  page_size: number;
-  total: number;
-  rows: RankRow[];
+  kind?: "delta" | "total" | string | null;
 };
 
 export type AccountStats = {
@@ -297,29 +293,30 @@ export const api = {
   jobs: () => request<JobSummary[]>("/api/jobs"),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   syncAccount: (accountId: number) => request<Job>(`/api/accounts/${accountId}/sync`, { method: "POST" }),
-  statsQuery: (accountId: number | null, rank: string, page: number, pageSize: number, start: string | null, end: string | null) => {
-    const params = new URLSearchParams({ rank, page: String(page), page_size: String(pageSize) });
+  statsQuery: (
+    accountId: number | null,
+    page: number,
+    pageSize: number,
+    start: string | null,
+    end: string | null,
+    name?: string | null,
+  ) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (accountId != null) params.set("account_id", String(accountId));
     if (start && end) {
       params.set("start", start);
       params.set("end", end);
     }
+    if (name?.trim()) params.set("name", name.trim());
     return request<AccountStats>(`/api/stats?${params}`);
   },
   library: () => request<LibraryItem[]>("/api/library"),
   checkLibrary: () => request<LibraryCheckResult>("/api/library/check", { method: "POST" }),
+  createLibrary: (body: { prefix: string; name: string; xunlei_url: string; quark_url: string; baidu_url: string }) =>
+    request<LibraryItem>("/api/library", { method: "POST", body: JSON.stringify(body) }),
   importLibrary: (rows: { name: string; url: string; password: string }[]) =>
     request<LibraryImportResult>("/api/library/import", { method: "POST", body: JSON.stringify({ rows }) }),
   updateLibrary: (id: number, body: Pick<LibraryItem, "name" | "xunlei_url" | "quark_url" | "baidu_url">) =>
     request<LibraryItem>(`/api/library/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteLibrary: (id: number) => request<{ ok: boolean }>(`/api/library/${id}`, { method: "DELETE" }),
-  createdShares: (page: number, pageSize: number, start: string, end: string) => {
-    const params = new URLSearchParams({
-      page: String(page),
-      page_size: String(pageSize),
-      start,
-      end,
-    });
-    return request<CreatedShares>(`/api/stats/created?${params}`);
-  },
 };

@@ -7,7 +7,9 @@ function parentOf(directory: string) {
   return parent || "/";
 }
 
-function crumbs(directory: string) {
+export type FolderCrumb = { name: string; path: string };
+
+function crumbs(directory: string): FolderCrumb[] {
   const items = [{ name: "根目录", path: "/" }];
   if (directory === "/") return items;
   let current = "";
@@ -32,18 +34,24 @@ function FolderIcon() {
 export default function FolderPicker({
   accountId,
   initialPath,
+  initialTrail,
   onCancel,
   onConfirm,
   onCreated,
 }: {
   accountId: number;
   initialPath: string;
+  initialTrail?: FolderCrumb[];
   onCancel: () => void;
-  onConfirm: (path: string) => void;
+  onConfirm: (path: string, trail: FolderCrumb[]) => void;
   onCreated: () => void;
 }) {
-  const [view, setView] = useState(initialPath.startsWith("/") ? initialPath : "/");
-  const [selected, setSelected] = useState(initialPath.startsWith("/") ? initialPath : "/");
+  const named = Boolean(initialTrail?.length);
+  const startTrail = named ? initialTrail! : [{ name: "根目录", path: "/" }];
+  const startPath = named ? startTrail[startTrail.length - 1].path : initialPath.startsWith("/") ? initialPath : "/";
+  const [view, setView] = useState(startPath);
+  const [selected, setSelected] = useState(startPath);
+  const [trail, setTrail] = useState<FolderCrumb[]>(startTrail);
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -84,13 +92,33 @@ export default function FolderPicker({
   );
   const parent = parentOf(view);
 
-  function open(path: string) {
+  function open(path: string, folderName?: string) {
     setView(path);
     setSelected(path);
+    if (named) {
+      setTrail((current) => {
+        const index = current.findIndex((item) => item.path === path);
+        if (index >= 0) return current.slice(0, index + 1);
+        return [...current, { name: folderName || "文件夹", path }];
+      });
+    }
     setNaming(false);
     setName("");
     setError("");
   }
+
+  function selectionTrail() {
+    if (!named) return crumbs(selected);
+    const index = trail.findIndex((item) => item.path === selected);
+    if (index >= 0) return trail.slice(0, index + 1);
+    const folder = folders.find((item) => item.path === selected);
+    if (folder) return [...trail, { name: folder.name, path: folder.path }];
+    return trail;
+  }
+
+  const selectedLabel = named ? selectionTrail().map((item) => item.name).join(" / ") : selected;
+  const visibleTrail = named ? trail : crumbs(view);
+  const canGoBack = named ? trail.length > 1 : parent !== null;
 
   async function createFolder() {
     const folderName = name.trim();
@@ -135,14 +163,21 @@ export default function FolderPicker({
         <div className="mt-4 flex items-center gap-3 border-b border-[#eef0f4] pb-3 text-sm">
           <button
             type="button"
-            disabled={parent === null}
-            onClick={() => parent && open(parent)}
+            disabled={!canGoBack}
+            onClick={() => {
+              if (named) {
+                const previous = trail[trail.length - 2];
+                if (previous) open(previous.path);
+                return;
+              }
+              if (parent) open(parent);
+            }}
             className="text-[#98a2b3] disabled:opacity-35"
           >
             〈 返回
           </button>
           <nav className="flex min-w-0 flex-wrap items-center gap-1 font-medium text-[#1f2430]">
-            {crumbs(view).map((crumb, index) => (
+            {visibleTrail.map((crumb, index) => (
               <span key={crumb.path} className="flex items-center gap-1">
                 {index > 0 ? <span className="text-[#d0d5dd]">/</span> : null}
                 <button type="button" onClick={() => open(crumb.path)}>
@@ -160,14 +195,14 @@ export default function FolderPicker({
             ? folders.map((folder) => (
                 <div
                   key={folder.path}
-                  onDoubleClick={() => open(folder.path)}
+                  onDoubleClick={() => open(folder.path, folder.name)}
                   className={`flex items-center rounded-xl px-3 py-3 ${selected === folder.path ? "bg-muted" : "hover:bg-[#fafafa]"}`}
                 >
                   <button type="button" onClick={() => setSelected(folder.path)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
                     <FolderIcon />
                     <span className="truncate text-sm font-medium text-[#1f2430]">{folder.name}</span>
                   </button>
-                  <button type="button" onClick={() => open(folder.path)} className="shrink-0 px-2 text-sm text-[#667085]">
+                  <button type="button" onClick={() => open(folder.path, folder.name)} className="shrink-0 px-2 text-sm text-[#667085]">
                     进入
                   </button>
                 </div>
@@ -178,7 +213,7 @@ export default function FolderPicker({
         {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
 
         <div className="mt-3 rounded-xl bg-[#f7f8fa] px-4 py-3 text-sm text-[#98a2b3]">
-          已选择： <span className="text-[#344054]">{selected}</span>
+          已选择： <span className="text-[#344054]">{selectedLabel}</span>
         </div>
 
         {naming ? (
@@ -218,7 +253,7 @@ export default function FolderPicker({
           <button type="button" onClick={onCancel} className="h-10 rounded-xl border border-[#e4e7ee] px-4 text-sm">
             取消
           </button>
-          <button type="button" onClick={() => onConfirm(selected)} className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white">
+          <button type="button" onClick={() => onConfirm(selected, selectionTrail())} className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white">
             确认选择
           </button>
         </div>

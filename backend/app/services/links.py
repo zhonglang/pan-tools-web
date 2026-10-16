@@ -3,8 +3,9 @@ from dataclasses import dataclass
 
 _SHARE = re.compile(r"https?://pan\.baidu\.com/s/1([0-9A-Za-z_-]+)")
 _QUARK = re.compile(r"https?://pan\.quark\.cn/s/([0-9A-Za-z]+)")
+_XUNLEI = re.compile(r"https?://pan\.xunlei\.com/s/([0-9A-Za-z_-]+)")
 _URL = re.compile(
-    r"https?://(?:pan\.baidu\.com/s/1[0-9A-Za-z_-]+|pan\.quark\.cn/s/[0-9A-Za-z]+)(?:\?[^\s\u00a0]*)?"
+    r"https?://(?:pan\.baidu\.com/s/1[0-9A-Za-z_-]+|pan\.quark\.cn/s/[0-9A-Za-z]+|pan\.xunlei\.com/s/[0-9A-Za-z_-]+)(?:\?[^\s\u00a0]*)?"
 )
 _PWD_QUERY = re.compile(r"[?&]pwd=([0-9A-Za-z]{4})")
 _PWD_LABEL = re.compile(r"提取码\s*[:：]\s*([0-9A-Za-z]{4})")
@@ -29,7 +30,7 @@ def _password(text: str) -> str | None:
         if found is not None:
             return found.group(1)
     for line in text.splitlines():
-        if _SHARE.search(line) is None and _QUARK.search(line) is None:
+        if _SHARE.search(line) is None and _QUARK.search(line) is None and _XUNLEI.search(line) is None:
             continue
         tail = _PWD_TAIL.search(line)
         if tail is not None:
@@ -63,6 +64,14 @@ def parse_share_link(text: str) -> ParsedLink | None:
             surl=quark.group(1),
             password=_password(cleaned),
             provider="quark",
+            title=_title(cleaned),
+        )
+    xunlei = _XUNLEI.search(cleaned)
+    if xunlei is not None:
+        return ParsedLink(
+            surl=xunlei.group(1),
+            password=_password(cleaned),
+            provider="xunlei",
             title=_title(cleaned),
         )
     return None
@@ -112,6 +121,8 @@ def canonical_input(chunk: str) -> str:
         return chunk.strip()
     if parsed.provider == "baidu":
         url = f"https://pan.baidu.com/s/1{parsed.surl}"
+    elif parsed.provider == "xunlei":
+        url = f"https://pan.xunlei.com/s/{parsed.surl}"
     else:
         url = f"https://pan.quark.cn/s/{parsed.surl}"
     if parsed.password:

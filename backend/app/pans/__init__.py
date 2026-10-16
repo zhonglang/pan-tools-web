@@ -15,5 +15,7 @@ def adapter_for(provider: str, client: httpx.Client):
 
         return QuarkAdapter(client)
     if provider == "xunlei":
-        return ClosedAdapter()
+        from app.pans.xunlei import XunleiAdapter
+
+        return XunleiAdapter(client)
     raise ValueError("网盘类型无效")

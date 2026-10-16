@@ -27,19 +27,6 @@ function downloadLabel(task: DownloadTask) {
   return task.error || "下载失败";
 }
 
-function formatSize(entry: DirEntry) {
-  if (entry.is_dir || entry.size == null) return "--";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = entry.size;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const digits = unit === 0 || value >= 10 ? 0 : 1;
-  return `${value.toFixed(digits)} ${units[unit]}`;
-}
-
 type TableSort = { key: "name" | "created" | "modified"; dir: "asc" | "desc" };
 
 function compareEntries(left: DirEntry, right: DirEntry, sort: TableSort | null) {
@@ -304,16 +291,23 @@ export default function TransferPage({ user }: { user: User }) {
       .catch(() => setShareDefaults({ baidu: "", quark: "", xunlei: "" }));
   }, [user.paid_features]);
 
+  const hasRunningDownloads = downloads.some((task) => task.status === "running");
+
   useEffect(() => {
     let stopped = false;
     let timer = 0;
     async function tick() {
       try {
         const rows = await api.downloads();
-        if (!stopped) setDownloads(rows);
-        timer = window.setTimeout(tick, rows.some((row) => row.status === "running") ? 1000 : 4000);
+        if (stopped) return;
+        setDownloads(rows);
+        if (rows.some((row) => row.status === "running")) {
+          timer = window.setTimeout(tick, 1000);
+        }
       } catch {
-        timer = window.setTimeout(tick, 4000);
+        if (!stopped && hasRunningDownloads) {
+          timer = window.setTimeout(tick, 4000);
+        }
       }
     }
     void tick();
@@ -321,7 +315,7 @@ export default function TransferPage({ user }: { user: User }) {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, []);
+  }, [hasRunningDownloads]);
 
   useEffect(() => {
     if (accountId === null || !canBrowse) {
@@ -614,7 +608,7 @@ export default function TransferPage({ user }: { user: User }) {
   const batchPlan = batchRenameOpen ? planBatchRename(renameTargets, batchSide, batchStart) : null;
   const baiduLocked = account?.provider === "baidu";
   const xunleiQuick = account?.provider === "xunlei";
-  const columnCount = user.paid_features ? 7 : 6;
+  const columnCount = user.paid_features ? 6 : 5;
 
   function openBatchRename() {
     setBatchSide("front");
@@ -743,7 +737,7 @@ export default function TransferPage({ user }: { user: User }) {
             }}
             className="inline-flex h-9 shrink-0 items-center justify-center rounded-full bg-ink px-4 text-sm font-medium text-white disabled:opacity-40"
           >
-            批量转存
+            转存分享
           </button>
           {user.paid_features ? (
             <>
@@ -866,7 +860,7 @@ export default function TransferPage({ user }: { user: User }) {
                       />
                     </th>
                   ) : null}
-                  <th className="sticky left-0 bg-[#f7f8fa] px-5 py-3 font-medium" aria-sort={tableSort?.key === "name" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
+                  <th className="sticky left-0 bg-[#f7f8fa] px-3 py-3 font-medium" aria-sort={tableSort?.key === "name" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
                     <button
                       type="button"
                       onClick={() => {
@@ -884,8 +878,7 @@ export default function TransferPage({ user }: { user: User }) {
                     </button>
                   </th>
                   <th className="w-52 px-3 py-3 font-medium">操作</th>
-                  <th className="w-24 px-3 py-3 font-medium">大小</th>
-                  <th className="w-24 px-3 py-3 font-medium">类型</th>
+                  <th className="w-36 px-3 py-3 font-medium">类型</th>
                   <th className="hidden w-40 px-3 py-3 font-medium md:table-cell" aria-sort={tableSort?.key === "created" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
                     <button
                       type="button"
@@ -975,11 +968,11 @@ export default function TransferPage({ user }: { user: User }) {
                           </td>
                         ) : null}
                         <td
-                          className={`sticky left-0 px-5 py-3.5 ${
+                          className={`sticky left-0 px-3 py-3.5 ${
                             selected === entry.path ? "bg-muted" : "bg-white group-hover:bg-[#fafafa]"
                           }`}
                         >
-                          <span className="flex min-w-0 items-center gap-2.5">
+                          <span className="flex min-w-0 items-center gap-1.5">
                             {entry.is_dir ? <FolderIcon /> : <FileIcon />}
                             {renameTarget?.path === entry.path ? (
                               <input
@@ -1109,8 +1102,7 @@ export default function TransferPage({ user }: { user: User }) {
                             </button>
                           </span>
                         </td>
-                        <td className="px-3 py-3.5 text-[#98a2b3]">{formatSize(entry)}</td>
-                        <td className="px-3 py-3.5">
+                        <td className="w-36 px-3 py-3.5">
                           <span
                             className={`inline-flex rounded-md px-2 py-0.5 text-xs ${
                               entry.is_dir ? "bg-[#fff4e8] text-[#f97316]" : "bg-[#f2f4f7] text-[#667085]"
@@ -1153,7 +1145,7 @@ export default function TransferPage({ user }: { user: User }) {
           >
             <div className="flex items-center justify-between">
               <h2 id="transfer-title" className="text-xl font-semibold text-[#1f2430]">
-                批量转存
+                转存分享
               </h2>
               <button type="button" aria-label="关闭" onClick={() => setComposer(false)} className="grid h-8 w-8 place-items-center text-xl text-[#98a2b3]">
                 ×

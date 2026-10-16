@@ -5,11 +5,12 @@ import BrandMark from "./BrandMark";
 
 const items = [
   { to: "/accounts", label: "网盘账号", end: false, icon: "cloud" },
-  { to: "/transfer", label: "批量转存", end: false, icon: "folder" },
-  { to: "/share", label: "批量分享", end: false, icon: "share" },
+  { to: "/transfer", label: "转存分享", end: false, icon: "folder" },
+  { to: "/library", label: "资源库", end: false, icon: "library" },
   { to: "/stats", label: "数据概览", end: false, icon: "chart" },
-  { to: "/jobs", label: "任务", end: false, icon: "list" },
+  { to: "/jobs", label: "执行记录", end: false, icon: "list" },
   { to: "/downloads", label: "下载记录", end: false, icon: "download" },
+  { to: "/settings", label: "系统配置", end: false, icon: "gear" },
 ] as const;
 
 function navClass(active: boolean) {
@@ -145,7 +146,7 @@ export default function AppShell({
   );
 }
 
-function NavIcon({ name }: { name: "cloud" | "folder" | "share" | "chart" | "list" | "download" | "users" }) {
+function NavIcon({ name }: { name: "cloud" | "folder" | "library" | "chart" | "list" | "download" | "gear" | "users" }) {
   const common = { width: 16, height: 16, viewBox: "0 0 18 18", fill: "none", "aria-hidden": true as const };
   if (name === "cloud") {
     return (
@@ -169,10 +170,15 @@ function NavIcon({ name }: { name: "cloud" | "folder" | "share" | "chart" | "lis
       </svg>
     );
   }
-  if (name === "share") {
+  if (name === "library") {
     return (
       <svg {...common}>
-        <path d="M7 9.5a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM13.2 6.2a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2ZM13.2 15a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2ZM8.7 8.6l3.2-1.7M8.7 10.2l3.2 1.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path
+          d="M3.5 4.5h4.2c.6 0 1.2.2 1.6.6L9 5.8l-.3-.7c.4-.4 1-.6 1.6-.6h4.2v9H10c-.6 0-1.1.2-1.5.6-.4-.4-.9-.6-1.5-.6H3.5v-9Z"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
       </svg>
     );
   }
@@ -187,6 +193,18 @@ function NavIcon({ name }: { name: "cloud" | "folder" | "share" | "chart" | "lis
     return (
       <svg {...common}>
         <path d="M6 4.5h9M6 9h9M6 13.5h9M3 4.5h.01M3 9h.01M3 13.5h.01" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (name === "gear") {
+    return (
+      <svg {...common}>
+        <path
+          d="M9 11.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4ZM9 2.8v1.4M9 13.8v1.4M3.4 5.6l1.2.7M13.4 11.7l1.2.7M3.4 12.4l1.2-.7M13.4 6.3l1.2-.7"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
       </svg>
     );
   }

@@ -1,21 +1,19 @@
-import csv
 import io
 import json
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.crypto import decrypt_cookie
+from app.services.transfers import keep_warmed
 from app.models import Job, JobItem, PanAccount, ShareLink
 from app.pans import adapter_for
 from app.pans.errors import LoginRejected, RateLimited, TransferFailed
-from app.services.transfers import EXPIRED, RETRY_DELAYS, fail_remaining, finish_job
+from app.services.transfers import EXPIRED, RETRY_DELAYS, fail_remaining, finish_job, publish
 
-SHANGHAI = ZoneInfo("Asia/Shanghai")
 _SHARE_ID = re.compile(r"/s/1([0-9A-Za-z_-]+)")
 
 
@@ -48,11 +46,13 @@ def execute_share(
 
     job.status = "running"
     job.updated_at = now
+    publish(session)
     account = session.get(PanAccount, job.account_id)
     items = session.scalars(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.id)).all()
     if account is None or account.status != "valid":
         fail_remaining(items, 0, now)
         finish_job(job, items, now)
+        publish(session)
         return
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
     adapter = adapter_for(account.provider, client)
@@ -60,10 +60,13 @@ def execute_share(
         if item.status != "pending":
             continue
         outcome = _run_share(session, adapter, item, account, job, cookie, sleeper, now)
+        cookie = keep_warmed(session, account, adapter, cookie)
+        publish(session)
         if outcome == "expired":
             fail_remaining(items, index + 1, now)
             break
     finish_job(job, items, now)
+    publish(session)
 
 
 def _run_share(session, adapter, item, account, job, cookie, sleeper, now) -> str:
@@ -121,7 +124,7 @@ def _run_share(session, adapter, item, account, job, cookie, sleeper, now) -> st
                 name=target["name"],
                 path=target["path"],
                 url=link,
-                password=share_password,
+                password=share_password or None,
                 expired=False,
                 status="active",
                 created_at=now,
@@ -138,16 +141,22 @@ def _run_share(session, adapter, item, account, job, cookie, sleeper, now) -> st
     return "failed"
 
 
-def shares_csv(rows: list[ShareLink]) -> bytes:
-    buffer = io.StringIO()
-    buffer.write("\ufeff")
-    writer = csv.writer(buffer)
-    writer.writerow(["名称", "路径", "分享链接", "提取码", "创建时间"])
+def shares_xlsx(rows: list[ShareLink]) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "分享链接"
+    sheet.append(["名称", "分享链接", "提取码"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
     for row in rows:
-        writer.writerow([row.name, row.path, row.url, row.password or "", _shanghai(row.created_at)])
-    return buffer.getvalue().encode("utf-8")
+        sheet.append([row.name, row.url, row.password or ""])
+    sheet.column_dimensions["A"].width = 36
+    sheet.column_dimensions["B"].width = 64
+    sheet.column_dimensions["C"].width = 14
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
 
-
-def _shanghai(value: datetime) -> str:
-    current = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    return current.astimezone(SHANGHAI).strftime("%Y-%m-%d %H:%M")

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.pans import LoginRejected, ProviderClosed, adapter_for
+from app.pans import LoginRejected, adapter_for
 
 COOKIE = "BDUSS=super-secret-cookie-value"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -48,14 +48,6 @@ def test_baidu_verify_rejects_non_json():
         adapter_for("baidu", client_for(handler)).verify_login(COOKIE)
 
 
-def test_xunlei_is_closed():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("closed provider must not send HTTP")
-
-    with pytest.raises(ProviderClosed, match="暂未开放"):
-        adapter_for("xunlei", client_for(handler)).verify_login(COOKIE)
-
-
 QUARK_COOKIE = "b-user-id=1; __pus=secret"
 
 
@@ -68,6 +60,13 @@ def test_quark_verify_returns_nickname():
 
     nickname = adapter_for("quark", client_for(handler)).verify_login(QUARK_COOKIE)
     assert nickname == "夸克昵称"
+
+
+def test_quark_verify_accepts_a_member_response_without_nickname():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": 200, "data": {"member_type": "NORMAL"}})
+
+    assert adapter_for("quark", client_for(handler)).verify_login(QUARK_COOKIE) == "夸克用户"
 
 
 def test_quark_verify_rejects_bad_cookie():

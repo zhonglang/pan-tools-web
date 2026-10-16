@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type Job } from "../api";
+import ClearableSelect from "../components/ClearableSelect";
 import PageHeader from "../components/PageHeader";
 import TableLoading from "../components/TableLoading";
 import TablePager, { PAGE_SIZE, pageOf } from "../components/TablePager";
@@ -29,10 +30,26 @@ function itemStatus(status: string, type: string) {
   return itemStatusName[status] ?? status;
 }
 
+/** Quark/Xunlei paths are opaque ids like /VP3uLEnH… — don't show them in the file column. */
+function isOpaqueIdPath(path: string) {
+  const trimmed = path.replace(/^\/+/, "").trim();
+  if (!trimmed || trimmed.includes("/")) return false;
+  return /^[A-Za-z0-9_-]{8,}$/.test(trimmed);
+}
+
 function itemLabel(text: string) {
   try {
     const data = JSON.parse(text) as { name?: string; path?: string };
-    if (typeof data.path === "string") return data.name ? `${data.name} · ${data.path}` : data.path;
+    const name = typeof data.name === "string" ? data.name.trim() : "";
+    const path = typeof data.path === "string" ? data.path : "";
+    if (name) {
+      if (path && !isOpaqueIdPath(path) && path !== "/" && path !== name && !path.endsWith(`/${name}`)) {
+        return `${name} · ${path}`;
+      }
+      return name;
+    }
+    if (path && !isOpaqueIdPath(path)) return path;
+    if (path) return "未命名文件";
   } catch {
     /* 转存任务保存的是原始链接 */
   }
@@ -50,7 +67,7 @@ export default function JobPage() {
   const { id } = useParams();
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
@@ -83,7 +100,7 @@ export default function JobPage() {
   const visible = useMemo(() => {
     const query = keyword.trim().toLowerCase();
     return (job?.items ?? []).filter((item) => {
-      if (statusFilter !== "all" && item.status !== statusFilter) return false;
+      if (statusFilter != null && item.status !== statusFilter) return false;
       if (!query) return true;
       const text = `${itemLabel(item.input_text)} ${item.error ?? ""} ${item.result ?? ""}`.toLowerCase();
       return text.includes(query);
@@ -95,43 +112,56 @@ export default function JobPage() {
   }, [id, keyword, statusFilter]);
 
   const paged = pageOf(visible, page, pageSize);
+  const canExport = job?.type === "share" && (job.status === "succeeded" || job.status === "partial");
+  const statusOptions = [
+    { value: "pending", label: "等待执行" },
+    { value: "running", label: runningName(job?.type ?? "transfer") },
+    { value: "succeeded", label: "成功" },
+    { value: "failed", label: "失败" },
+  ];
 
   return (
     <div>
       <div className="mb-6 flex flex-wrap gap-4 text-sm">
         <Link to="/jobs" className="font-medium text-ink/55 hover:text-ink">
-          ← 任务列表
+          ← 执行记录
         </Link>
         <Link to="/transfer" className="font-medium text-ink/55 hover:text-ink">
           返回转存
         </Link>
-        {job?.type === "share" ? (
-          <a href={`/api/jobs/${job.id}/export`} className="font-medium text-ink/55 hover:text-ink">
-            导出 CSV
-          </a>
-        ) : null}
       </div>
       <PageHeader
         title={job ? (job.status === "running" ? runningName(job.type) : jobStatusName[job.status] ?? job.status) : "任务详情"}
-        description={job ? (job.type === "sync" ? "同步这个账号的全部分享记录" : `目录 ${job.directory}`) : undefined}
+        description={
+          job
+            ? job.type === "sync"
+              ? "同步这个账号的全部分享记录"
+              : `目录 ${job.directory_label || job.directory}`
+            : undefined
+        }
       />
       {error ? <p className="alert -mt-4 mb-4">{error}</p> : null}
       {job?.error ? <p className="alert -mt-4 mb-4">{job.error}</p> : null}
-      <div className="mb-4 flex flex-wrap gap-3">
-        <select className="h-10 rounded-xl border border-line bg-white px-3 text-sm" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="按状态筛选">
-          <option value="all">全部状态</option>
-          <option value="pending">等待执行</option>
-          <option value="running">{runningName(job?.type ?? "transfer")}</option>
-          <option value="succeeded">成功</option>
-          <option value="failed">失败</option>
-        </select>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <ClearableSelect
+          options={statusOptions}
+          value={statusFilter}
+          onChange={setStatusFilter}
+          placeholder="全部状态"
+          ariaLabel="按状态筛选"
+        />
         <input
-          className="h-10 min-w-56 rounded-xl border border-line bg-white px-3 text-sm"
+          className="h-10 min-w-56 rounded-full border border-line bg-white px-3 text-sm"
           value={keyword}
           placeholder={job?.type === "share" ? "筛选文件或结果" : "筛选链接或结果"}
           aria-label="按内容筛选"
           onChange={(event) => setKeyword(event.target.value)}
         />
+        {canExport ? (
+          <a href={`/api/jobs/${job.id}/export`} className="btn btn-primary ml-auto">
+            导出 Excel
+          </a>
+        ) : null}
       </div>
       <div className="overflow-hidden rounded-2xl border border-line bg-white">
         <div className="overflow-x-auto">

@@ -16,7 +16,7 @@ from app.services.bootstrap import ensure_admin
 from app.core.config import get_settings
 from app.core.database import Base, make_engine, make_session_factory
 from app.services.downloads import interrupt_orphans
-from app.api.routes import accounts, admin, auth, shares, stats, transfers
+from app.api.routes import accounts, admin, auth, library, settings as settings_routes, shares, stats, transfers
 
 
 @asynccontextmanager
@@ -45,7 +45,9 @@ def create_app() -> FastAPI:
     app.include_router(accounts.router)
     app.include_router(transfers.router)
     app.include_router(shares.router)
+    app.include_router(settings_routes.router)
     app.include_router(stats.router)
+    app.include_router(library.router)
     return app
 
 

@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.crypto import decrypt_cookie
+from app.core.crypto import decrypt_cookie, encrypt_cookie
 from app.services.links import parse_share_link
 from app.models import Job, JobItem, PanAccount
 from app.pans import adapter_for
@@ -27,6 +27,17 @@ def normalize_directory(directory: str) -> str:
     if not cleaned.startswith("/") or ".." in cleaned.split("/"):
         raise ValueError("目标目录无效")
     return cleaned
+
+
+def clean_directory_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def publish(session: Session) -> None:
+    session.commit()
 
 
 def _aware(value: datetime) -> datetime:
@@ -54,12 +65,22 @@ def fail_remaining(items: list[JobItem], start: int, now: datetime) -> None:
             item.updated_at = now
 
 
+def keep_warmed(session: Session, account: PanAccount, adapter, cookie: str) -> str:
+    warmed = getattr(adapter, "warmed", None)
+    if not isinstance(warmed, str) or warmed == cookie:
+        return cookie
+    account.cookie_ciphertext = encrypt_cookie(warmed, get_settings().cookie_fernet_key)
+    return warmed
+
+
 def _provider_error(provider: str) -> str:
     if provider == "baidu":
         return "请使用百度账号"
     if provider == "quark":
         return "请使用夸克账号"
-    return "暂未开放"
+    if provider == "xunlei":
+        return "请使用迅雷账号"
+    return "链接无法解析"
 
 
 def run_item(
@@ -132,11 +153,13 @@ def run_item(
 def execute_job(session: Session, client, job: Job, sleeper: Callable[[float], None], now: datetime) -> None:
     job.status = "running"
     job.updated_at = now
+    publish(session)
     account = session.get(PanAccount, job.account_id)
     items = session.scalars(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.id)).all()
     if account is None or account.status != "valid":
         fail_remaining(items, 0, now)
         finish_job(job, items, now)
+        publish(session)
         return
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
     adapter = adapter_for(account.provider, client)
@@ -144,10 +167,13 @@ def execute_job(session: Session, client, job: Job, sleeper: Callable[[float], N
         if item.status != "pending":
             continue
         outcome = run_item(adapter, item, account, job.directory, cookie, sleeper, now)
+        cookie = keep_warmed(session, account, adapter, cookie)
+        publish(session)
         if outcome == "expired":
             fail_remaining(items, index + 1, now)
             break
     finish_job(job, items, now)
+    publish(session)
 
 
 def reclaim_stale(session: Session, now: datetime) -> None:

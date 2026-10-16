@@ -1,3 +1,4 @@
+import io
 import json
 from datetime import timedelta
 from urllib.parse import parse_qs
@@ -110,11 +111,15 @@ def test_share_job_saves_links_and_exports_csv(client):
     assert shown.json()["type"] == "share"
     exported = client.get(f"/api/jobs/{job_id}/export")
     assert exported.status_code == 200
-    text = exported.content.decode("utf-8")
-    assert text.startswith("\ufeff名称,路径,分享链接,提取码,创建时间\r\n")
-    assert "说明.txt,/" in text or "说明.txt,/说明.txt" in text
-    assert "https://pan.baidu.com/s/1aaaa?pwd=ab12" in text
-    assert "海报.jpg" not in text
+    assert exported.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    from openpyxl import load_workbook
+
+    sheet = load_workbook(io.BytesIO(exported.content)).active
+    assert [cell.value for cell in sheet[1]] == ["名称", "分享链接", "提取码"]
+    assert sheet["A2"].value == "说明.txt"
+    assert sheet["B2"].value == "https://pan.baidu.com/s/1aaaa?pwd=ab12"
+    assert sheet["C2"].value == "ab12"
+    assert sheet["A3"].value is None
     with client.app.state.session_factory() as session:
         link = session.scalars(select(ShareLink)).one()
         assert link.password == "ab12"
@@ -149,3 +154,30 @@ def test_expired_cookie_stops_remaining_shares(client):
     assert errors == ["登录已失效，请重新登录", EXPIRED]
     assert calls["n"] == 1
     assert json.loads(shown.text)
+
+
+def test_baidu_batch_rejects_a_public_link(client):
+    account_id = bind_and_pay(client)
+    rejected = client.post(
+        "/api/shares",
+        json={"account_id": account_id, "directory": "/", "visibility": "public", "targets": TARGETS[:1]},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "百度网盘不支持公开链接"
+
+
+def test_share_passwords_are_saved_for_the_current_user(client):
+    register(client)
+    empty = client.get("/api/settings/share-passwords")
+    assert empty.status_code == 200
+    assert empty.json() == {"baidu_password": None, "quark_password": None, "xunlei_password": None}
+    saved = client.put(
+        "/api/settings/share-passwords",
+        json={"baidu_password": "ab12", "quark_password": ""},
+    )
+    assert saved.status_code == 200
+    assert saved.json() == {"baidu_password": "ab12", "quark_password": None, "xunlei_password": None}
+    again = client.get("/api/settings/share-passwords")
+    assert again.json()["baidu_password"] == "ab12"
+    invalid = client.put("/api/settings/share-passwords", json={"baidu_password": "汉字12", "quark_password": None})
+    assert invalid.status_code == 422

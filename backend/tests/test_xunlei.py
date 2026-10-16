@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -17,6 +18,19 @@ COOKIE = json.dumps(
     separators=(",", ":"),
     sort_keys=True,
 )
+
+
+def _cookie(**overrides):
+    payload = {
+        "access_token": "access-1",
+        "captcha_token": "cap-1",
+        "client_id": "Xp6vsxz_7IYVw2BB",
+        "device_id": "a" * 32,
+        "refresh_token": "refresh-1",
+        "user_id": "user-1",
+    }
+    payload.update(overrides)
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 def client_for(handler):
@@ -171,14 +185,22 @@ def test_xunlei_share_list_keeps_missing_counts_empty():
 
 
 def test_xunlei_copy_posts_to_parent():
-    calls = {"list": 0}
+    calls = {"list": 0, "task": 0}
+    sleeps: list[float] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/files/copy"):
+        if request.url.path.endswith("/files:batchCopy"):
             body = json.loads(request.content.decode())
-            assert body["file_ids"] == ["fid-src"]
+            assert body["ids"] == ["fid-src"]
             assert body["to"]["parent_id"] == "fid-dest"
-            return httpx.Response(200, json={"file": {"id": "fid-new", "name": "源名"}})
+            return httpx.Response(200, json={"task_id": "task-copy-1", "space": ""})
+        if request.url.path.endswith("/tasks/task-copy-1"):
+            calls["task"] += 1
+            phase = "PHASE_TYPE_RUNNING" if calls["task"] == 1 else "PHASE_TYPE_COMPLETE"
+            return httpx.Response(
+                200,
+                json={"id": "task-copy-1", "phase": phase, "message": "已添加", "type": "copy"},
+            )
         if request.url.path.endswith("/files") and request.method == "GET":
             calls["list"] += 1
             if calls["list"] == 1:
@@ -204,7 +226,11 @@ def test_xunlei_copy_posts_to_parent():
             return httpx.Response(200, json={})
         raise AssertionError(f"{request.method} {request.url.path}")
 
-    adapter_for("xunlei", client_for(handler)).copy(COOKIE, "/fid-src", "/fid-dest", "新名字")
+    adapter_for("xunlei", client_for(handler)).copy(
+        COOKIE, "/fid-src", "/fid-dest", "新名字", sleeper=sleeps.append
+    )
+    assert calls["task"] >= 2
+    assert sleeps
 
 
 def test_xunlei_copy_raises_when_name_exists():
@@ -228,3 +254,60 @@ def test_xunlei_copy_raises_when_name_exists():
 
     with pytest.raises(DuplicateName):
         adapter_for("xunlei", client_for(handler)).copy(COOKIE, "/fid-src", "/fid-dest", "同名")
+
+
+def test_xunlei_prepare_refreshes_when_access_expired():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/auth/token"):
+            calls.append("refresh")
+            body = json.loads(request.content.decode())
+            assert body["refresh_token"] == "refresh-1"
+            return httpx.Response(
+                200,
+                json={"access_token": "access-2", "refresh_token": "refresh-2", "expires_in": 7200},
+            )
+        if path.endswith("/captcha/init"):
+            calls.append("captcha")
+            return httpx.Response(200, json={"captcha_token": "cap-2"})
+        raise AssertionError(path)
+
+    warmed = adapter_for("xunlei", client_for(handler)).prepare(_cookie(expires_at=1))
+    data = json.loads(warmed)
+    assert data["access_token"] == "access-2"
+    assert data["refresh_token"] == "refresh-2"
+    assert data["captcha_token"] == "cap-2"
+    assert data["expires_at"] >= int(time.time()) + 7100
+    assert calls == ["refresh", "captcha"]
+
+
+def test_xunlei_uses_warmed_token_after_refresh():
+    calls = {"files": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/files") and request.method == "GET":
+            calls["files"] += 1
+            auth = request.headers.get("authorization")
+            if calls["files"] == 1:
+                assert auth == "Bearer access-1"
+                return httpx.Response(401, json={"error_code": 16, "error": "unauthenticated"})
+            assert auth == "Bearer access-2"
+            return httpx.Response(200, json={"files": [], "next_page_token": ""})
+        if path.endswith("/auth/token"):
+            return httpx.Response(
+                200,
+                json={"access_token": "access-2", "refresh_token": "refresh-2", "expires_in": 7200},
+            )
+        if path.endswith("/captcha/init"):
+            return httpx.Response(200, json={"captcha_token": "cap-2"})
+        raise AssertionError(f"{request.method} {path}")
+
+    adapter = adapter_for("xunlei", client_for(handler))
+    assert adapter.list_dir(_cookie(expires_at=int(time.time()) + 3600), "/") == []
+    # Second call must use rotated tokens from warmed, not the original cookie string.
+    assert adapter.list_dir(_cookie(expires_at=int(time.time()) + 3600), "/") == []
+    assert calls["files"] == 3  # 401 + retry + second list_dir
+    assert json.loads(adapter.warmed)["refresh_token"] == "refresh-2"

@@ -22,7 +22,7 @@ def list_drives(session: Session, user_id: int) -> list[PanAccount]:
     return list(
         session.scalars(
             select(PanAccount)
-            .where(PanAccount.user_id == user_id, PanAccount.provider.in_(("baidu", "quark")))
+            .where(PanAccount.user_id == user_id, PanAccount.provider.in_(("baidu", "quark", "xunlei")))
             .order_by(PanAccount.id)
         ).all()
     )

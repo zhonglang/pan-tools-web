@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type AccountStats, type CreatedShares, type PanAccount, type User } from "../api";
+import { api, type AccountStats, type PanAccount, type User } from "../api";
 import AccountSelect from "../components/AccountSelect";
 import DateRangePicker, { shortcutRange } from "../components/DateRangePicker";
 import PageHeader from "../components/PageHeader";
@@ -8,7 +8,7 @@ import TableLoading from "../components/TableLoading";
 import TablePager, { PAGE_SIZE } from "../components/TablePager";
 import TransferChart from "../components/TransferChart";
 
-function formatTime(value: string | null) {
+function formatTime(value: string | null | undefined) {
   if (!value) return "尚未同步";
   const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
   return new Intl.DateTimeFormat("zh-CN", {
@@ -26,53 +26,59 @@ function metricText(value: number | null) {
   return value == null ? "暂无" : String(value);
 }
 
-function metricNote(metric: { value: number | null; from_time: string | null }, rank: string) {
-  if (rank === "history") return metric.value == null ? "暂无累计" : "历史累计";
-  if (metric.from_time) return `本段从 ${formatTime(metric.from_time)} 起算`;
-  if (metric.value == null) return "快照不足，暂无增量";
-  return "按本段开始前的快照计算";
+function deltaText(value: number | null) {
+  if (value == null) return "暂无";
+  if (value > 0) return `+${value}`;
+  return String(value);
 }
 
 export default function StatsPage({ user }: { user: User }) {
-  const initialRange = shortcutRange("week");
+  const initialRange = shortcutRange("today");
   const [accounts, setAccounts] = useState<PanAccount[]>([]);
   const [accountId, setAccountId] = useState<number | null>(null);
-  const [rank, setRank] = useState("range");
   const [start, setStart] = useState(initialRange.start);
   const [end, setEnd] = useState(initialRange.end);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
+  const [nameInput, setNameInput] = useState("");
+  const [nameQuery, setNameQuery] = useState("");
   const [stats, setStats] = useState<AccountStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [accountsLoaded, setAccountsLoaded] = useState(false);
-  const createdInitial = shortcutRange("week");
-  const [createdStart, setCreatedStart] = useState(createdInitial.start);
-  const [createdEnd, setCreatedEnd] = useState(createdInitial.end);
-  const [createdPage, setCreatedPage] = useState(1);
-  const [createdPageSize, setCreatedPageSize] = useState(PAGE_SIZE);
-  const [created, setCreated] = useState<CreatedShares | null>(null);
-  const [createdLoading, setCreatedLoading] = useState(true);
-  const [createdError, setCreatedError] = useState("");
-  const [panel, setPanel] = useState<"rank" | "created">("rank");
   const statsTicket = useRef(0);
-  const createdTicket = useRef(0);
+  const ranged = Boolean(start && end);
 
-  useEffect(() => {
-    if (!user.paid_features) return;
-    api
+  function loadAccounts() {
+    return api
       .accounts()
       .then((rows) => {
-        setAccounts(rows.filter((row) => row.provider === "baidu" || row.provider === "quark"));
+        setAccounts(rows.filter((row) => row.provider === "baidu"));
       })
       .catch((caught: Error) => setError(caught.message))
       .finally(() => setAccountsLoaded(true));
-  }, [user.paid_features]);
+  }
 
   useEffect(() => {
     if (!user.paid_features) return;
-    if (rank === "range" && start > end) {
+    void loadAccounts();
+  }, [user.paid_features]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = nameInput.trim();
+      setNameQuery((prev) => {
+        if (prev !== next) setPage(1);
+        return next;
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [nameInput]);
+
+  useEffect(() => {
+    if (!user.paid_features) return;
+    if (ranged && start > end) {
       setError("开始日期不能晚于结束日期");
       setLoading(false);
       return;
@@ -80,7 +86,7 @@ export default function StatsPage({ user }: { user: User }) {
     const ticket = ++statsTicket.current;
     setLoading(true);
     api
-      .statsQuery(accountId, rank, page, pageSize, start, end)
+      .statsQuery(accountId, page, pageSize, ranged ? start : null, ranged ? end : null, nameQuery || null)
       .then((next) => {
         if (ticket !== statsTicket.current) return;
         setStats(next);
@@ -92,35 +98,14 @@ export default function StatsPage({ user }: { user: User }) {
         setError(caught.message);
         setLoading(false);
       });
-  }, [accountId, end, page, pageSize, rank, start, user.paid_features]);
-
-  useEffect(() => {
-    if (!user.paid_features) return;
-    if (createdStart > createdEnd) {
-      setCreatedError("开始日期不能晚于结束日期");
-      setCreatedLoading(false);
-      return;
-    }
-    const ticket = ++createdTicket.current;
-    setCreatedLoading(true);
-    api
-      .createdShares(createdPage, createdPageSize, createdStart, createdEnd)
-      .then((next) => {
-        if (ticket !== createdTicket.current) return;
-        setCreated(next);
-        setCreatedError("");
-        setCreatedLoading(false);
-      })
-      .catch((caught: Error) => {
-        if (ticket !== createdTicket.current) return;
-        setCreatedError(caught.message);
-        setCreatedLoading(false);
-      });
-  }, [createdEnd, createdPage, createdPageSize, createdStart, user.paid_features]);
+  }, [accountId, end, nameQuery, page, pageSize, ranged, start, user.paid_features]);
 
   const account = accounts.find((row) => row.id === accountId) ?? null;
 
-  const syncTargets = accountId == null ? accounts.filter((row) => row.status === "valid") : account?.status === "valid" ? [account] : [];
+  const syncTargets = (accountId == null ? accounts : account ? [account] : []).filter(
+    (row) => row.provider === "baidu" && row.status === "valid",
+  );
+  const baiduAccounts = accounts.filter((row) => row.provider === "baidu");
 
   async function refresh() {
     if (syncTargets.length === 0) return;
@@ -135,7 +120,8 @@ export default function StatsPage({ user }: { user: User }) {
         }
         if (job.status === "failed") setError(job.error || "同步失败");
       }
-      setStats(await api.statsQuery(accountId, rank, page, pageSize, start, end));
+      await loadAccounts();
+      setStats(await api.statsQuery(accountId, page, pageSize, ranged ? start : null, ranged ? end : null, nameQuery || null));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "同步失败");
     } finally {
@@ -154,11 +140,30 @@ export default function StatsPage({ user }: { user: User }) {
 
   const cards = stats
     ? [
-        { label: "分享总量", value: String(stats.total), note: "当前仍在分享列表中的记录", tone: "#0f766e" },
-        { label: "新增分享", value: String(stats.new_shares), note: rank === "history" ? "全部有效分享" : "按分享创建时间计入本段", tone: "#0e7490" },
-        { label: "转存", value: metricText(stats.transfers.value), note: metricNote(stats.transfers, rank), tone: "#9a3412" },
-        { label: "浏览", value: metricText(stats.views.value), note: metricNote(stats.views, rank), tone: "#44403c" },
-        { label: "下载", value: metricText(stats.downloads.value), note: metricNote(stats.downloads, rank), tone: "#a16207" },
+        {
+          label: "总链接",
+          value: String(stats.total),
+          note: ranged ? "不含开始日，只计其后新建" : "当前有效分享总数",
+          tone: "#0f766e",
+        },
+        {
+          label: "总转存",
+          value: metricText(stats.transfers.value),
+          note: ranged ? (stats.transfers.value == null ? "日表不足，暂无水位差" : "区间水位差") : "当前累计",
+          tone: "#9a3412",
+        },
+        {
+          label: "总浏览",
+          value: metricText(stats.views.value),
+          note: ranged ? (stats.views.value == null ? "日表不足，暂无水位差" : "区间水位差") : "当前累计",
+          tone: "#44403c",
+        },
+        {
+          label: "总下载",
+          value: metricText(stats.downloads.value),
+          note: ranged ? (stats.downloads.value == null ? "日表不足，暂无水位差" : "区间水位差") : "当前累计",
+          tone: "#a16207",
+        },
       ]
     : [];
 
@@ -168,9 +173,26 @@ export default function StatsPage({ user }: { user: User }) {
         title="数据概览"
         description={`首次成功快照：${formatTime(stats?.first_snapshot_at ?? null)}。数字按北京时间统计。`}
         extra={
-          <button type="button" className="btn btn-primary" disabled={syncing || syncTargets.length === 0} onClick={() => void refresh()}>
-            {syncing ? "正在同步" : "刷新数据"}
-          </button>
+          <div className="group relative">
+            <button type="button" className="btn btn-primary" disabled={syncing || syncTargets.length === 0} onClick={() => void refresh()}>
+              {syncing ? "正在同步" : "刷新数据"}
+            </button>
+            <div className="pointer-events-none absolute right-0 top-full z-20 mt-2 hidden w-72 rounded-xl border border-line bg-white p-3 text-left text-[12px] shadow-lg group-hover:block">
+              <p className="mb-2 font-medium text-ink/70">各网盘最近更新</p>
+              {baiduAccounts.length === 0 ? (
+                <p className="text-ink/45">暂无百度账号</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {baiduAccounts.map((row) => (
+                    <li key={row.id} className="flex items-start justify-between gap-3">
+                      <span className="min-w-0 truncate text-ink/80">{row.nickname || "未命名账号"}</span>
+                      <span className="shrink-0 tabular-nums text-ink/55">{formatTime(row.last_synced_at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         }
       />
       {error ? <p className="alert -mt-4 mb-4">{error}</p> : null}
@@ -183,44 +205,38 @@ export default function StatsPage({ user }: { user: User }) {
             setPage(1);
           }}
         />
-        <div className="inline-flex rounded-xl bg-canvas p-1">
+        <DateRangePicker
+          start={start}
+          end={end}
+          onChange={(nextStart, nextEnd) => {
+            setStart(nextStart);
+            setEnd(nextEnd);
+            setPage(1);
+          }}
+        />
+        {ranged ? (
           <button
             type="button"
-            aria-pressed={rank === "range"}
-            className={`h-8 rounded-lg px-3 text-sm font-semibold ${rank === "range" ? "bg-white text-ink" : "text-ink/55"}`}
+            className="h-10 rounded-lg border border-line px-3 text-sm text-ink/70 hover:border-primary hover:text-ink"
             onClick={() => {
-              setRank("range");
+              setStart("");
+              setEnd("");
               setPage(1);
             }}
           >
-            时间范围增量
+            清除日期
           </button>
-          <button
-            type="button"
-            aria-pressed={rank === "history"}
-            className={`h-8 rounded-lg px-3 text-sm font-semibold ${rank === "history" ? "bg-white text-ink" : "text-ink/55"}`}
-            onClick={() => {
-              setRank("history");
-              setPage(1);
-            }}
-          >
-            历史累计
-          </button>
-        </div>
-        {rank === "range" ? (
-          <DateRangePicker
-            start={start}
-            end={end}
-            onChange={(nextStart, nextEnd) => {
-              setStart(nextStart);
-              setEnd(nextEnd);
-              setPage(1);
-            }}
-          />
-        ) : null}
+        ) : (
+          <span className="text-sm text-ink/45">未选日期时显示历史累计</span>
+        )}
       </div>
       {account && account.status !== "valid" ? <p className="mb-4 text-sm text-ink/55">这个账号需要重新登录后才能刷新。</p> : null}
-      <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
+      {ranged ? (
+        <p className="mb-3 text-sm text-ink/55">
+          总链接不含开始日当天新建的分享；例如选 10/14～10/15，只统计 10/15 当天新建的链接。
+        </p>
+      ) : null}
+      <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((card) => (
           <article
             key={card.label}
@@ -241,59 +257,36 @@ export default function StatsPage({ user }: { user: User }) {
           </article>
         ))}
       </div>
-      {stats ? (
-        <TransferChart dates={stats.dates} lines={stats.lines} mode={rank} start={start} end={end} />
-      ) : (
-        <section className="mt-4 flex aspect-[720/280] items-center justify-center rounded-2xl border border-line bg-white px-5 text-sm text-ink/45">正在读取转存趋势。</section>
-      )}
+      {ranged ? (
+        stats ? (
+          <TransferChart dates={stats.dates} lines={stats.lines} start={start} end={end} />
+        ) : (
+          <section className="mt-4 flex aspect-[720/280] items-center justify-center rounded-2xl border border-line bg-white px-5 text-sm text-ink/45">
+            正在读取转存趋势。
+          </section>
+        )
+      ) : null}
       <section className="mt-6 overflow-hidden rounded-2xl border border-line bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-          <div className="flex gap-1 rounded-xl bg-canvas p-1" role="tablist" aria-label="数据表格">
-            {(
-              [
-                ["rank", "分享排名"],
-                ["created", "新建分享"],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                role="tab"
-                aria-selected={panel === id}
-                className={`h-9 rounded-lg px-4 text-sm font-semibold ${
-                  panel === id ? "bg-white text-ink" : "text-ink/50 hover:text-ink"
-                }`}
-                onClick={() => setPanel(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {panel === "created" ? (
-            <DateRangePicker
-              label="选择创建时间"
-              align="right"
-              start={createdStart}
-              end={createdEnd}
-              onChange={(nextStart, nextEnd) => {
-                setCreatedStart(nextStart);
-                setCreatedEnd(nextEnd);
-                setCreatedPage(1);
-              }}
+          <h2 className="text-base font-semibold">分享列表</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="search"
+              value={nameInput}
+              onChange={(event) => setNameInput(event.target.value)}
+              placeholder="按分析名称搜索"
+              className="h-9 w-52 rounded-lg border border-line bg-white px-3 text-sm outline-none focus:border-primary"
             />
-          ) : (
-            <p className="text-xs text-ink/45">跟着上方的账号和时间。</p>
-          )}
+            <p className="text-xs text-ink/45">{ranged ? "浏览/下载/转存量为结束日水位，转存增量为结束日减开始日" : "指标为当前累计"}</p>
+          </div>
         </div>
         <p className="px-4 py-3 text-sm text-ink/55">
-          {panel === "rank"
-            ? "按当前账号和时间，比较各分享的浏览、下载和转存。"
-            : "只看这段时间里新建的分享。转存、下载和浏览是这些链接现在的数字，不按账号筛选。"}
+          {ranged
+            ? "浏览量、下载量、转存量为结束日快照；转存增量为结束日减去开始日。周期内新建的链接，转存增量等于转存量。"
+            : "按当前账号，比较各分享当前的浏览、下载和转存累计。"}
         </p>
-        {panel === "created" && createdError ? <p className="alert mx-4 mb-3">{createdError}</p> : null}
         <div className="max-h-[32rem] overflow-auto">
-          {panel === "rank" ? (
-          <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+          <table className={`w-full border-collapse text-left text-sm ${ranged ? "min-w-[860px]" : "min-w-[760px]"}`}>
             <thead className="sticky top-0 bg-canvas text-[12px] text-ink/50">
               <tr>
                 <th className="px-4 py-3 font-medium">排名</th>
@@ -303,21 +296,22 @@ export default function StatsPage({ user }: { user: User }) {
                 <th className="px-4 py-3 font-medium">浏览量</th>
                 <th className="px-4 py-3 font-medium">下载量</th>
                 <th className="px-4 py-3 font-medium">转存量</th>
+                {ranged ? <th className="px-4 py-3 font-medium">转存增量</th> : null}
               </tr>
             </thead>
             <tbody>
-              {loading ? <TableLoading colSpan={7} /> : null}
+              {loading ? <TableLoading colSpan={ranged ? 8 : 7} /> : null}
               {!loading && accountsLoaded && accounts.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-ink/45">
+                  <td colSpan={ranged ? 8 : 7} className="px-4 py-10 text-center text-ink/45">
                     还没有网盘账号。
                   </td>
                 </tr>
               ) : null}
               {!loading && stats && accounts.length > 0 && stats.rows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-ink/45">
-                    还没有可统计的分享。
+                  <td colSpan={ranged ? 8 : 7} className="px-4 py-10 text-center text-ink/45">
+                    {nameQuery ? "没有匹配的分享。" : "还没有可统计的分享。"}
                   </td>
                 </tr>
               ) : null}
@@ -335,79 +329,27 @@ export default function StatsPage({ user }: { user: User }) {
                       <td className="px-4 py-3">{metricText(row.views)}</td>
                       <td className="px-4 py-3">{metricText(row.downloads)}</td>
                       <td className="px-4 py-3">{metricText(row.transfers)}</td>
+                      {ranged ? (
+                        <td className={`px-4 py-3 ${(row.transfer_delta ?? 0) > 0 ? "font-medium text-emerald-600" : ""}`}>
+                          {deltaText(row.transfer_delta ?? null)}
+                        </td>
+                      ) : null}
                     </tr>
                   ))
                 : null}
             </tbody>
           </table>
-          ) : (
-          <table className="w-full min-w-[860px] border-collapse text-left text-sm">
-            <thead className="sticky top-0 bg-canvas text-[12px] text-ink/50">
-              <tr>
-                <th className="px-4 py-3 font-medium">序号</th>
-                <th className="px-4 py-3 font-medium">分析名称</th>
-                <th className="px-4 py-3 font-medium">账号名称</th>
-                <th className="px-4 py-3 font-medium">分享链接</th>
-                <th className="px-4 py-3 font-medium">创建时间</th>
-                <th className="px-4 py-3 font-medium">浏览量</th>
-                <th className="px-4 py-3 font-medium">下载量</th>
-                <th className="px-4 py-3 font-medium">转存量</th>
-              </tr>
-            </thead>
-            <tbody>
-              {createdLoading ? <TableLoading colSpan={8} /> : null}
-              {!createdLoading && created && created.rows.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-ink/45">
-                    这段时间没有新建分享。
-                  </td>
-                </tr>
-              ) : null}
-              {!createdLoading
-                ? created?.rows.map((row, index) => (
-                    <tr key={`${row.url}-${row.created_at}`} className="border-t border-line">
-                      <td className="px-4 py-3 text-ink/70">{(created.page - 1) * created.page_size + index + 1}</td>
-                      <td className="max-w-40 truncate px-4 py-3 font-medium">{row.name || "—"}</td>
-                      <td className="max-w-40 truncate px-4 py-3">{row.account_name || "—"}</td>
-                      <td className="max-w-md break-all px-4 py-3">
-                        <a href={row.url} target="_blank" rel="noreferrer" className="text-ink hover:underline">
-                          {row.url}
-                        </a>
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-ink/70">{formatTime(row.created_at)}</td>
-                      <td className="px-4 py-3">{metricText(row.views)}</td>
-                      <td className="px-4 py-3">{metricText(row.downloads)}</td>
-                      <td className="px-4 py-3">{metricText(row.transfers)}</td>
-                    </tr>
-                  ))
-                : null}
-            </tbody>
-          </table>
-          )}
         </div>
-        {panel === "rank" ? (
-          <TablePager
-            page={page}
-            total={stats?.rank_total ?? 0}
-            pageSize={pageSize}
-            onPage={setPage}
-            onPageSize={(size) => {
-              setPageSize(size);
-              setPage(1);
-            }}
-          />
-        ) : (
-          <TablePager
-            page={createdPage}
-            total={created?.total ?? 0}
-            pageSize={createdPageSize}
-            onPage={setCreatedPage}
-            onPageSize={(size) => {
-              setCreatedPageSize(size);
-              setCreatedPage(1);
-            }}
-          />
-        )}
+        <TablePager
+          page={page}
+          total={stats?.rank_total ?? 0}
+          pageSize={pageSize}
+          onPage={setPage}
+          onPageSize={(size) => {
+            setPageSize(size);
+            setPage(1);
+          }}
+        />
       </section>
     </div>
   );

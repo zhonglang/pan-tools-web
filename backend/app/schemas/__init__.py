@@ -3,7 +3,7 @@ from app.schemas.auth import LoginIn, PlanUpdateIn, RegisterIn, UserOut
 from app.schemas.download import DownloadTaskOut
 from app.schemas.job import JobItemOut, JobOut, JobSummaryOut
 from app.schemas.share import ShareBatchIn, SharePasswordsIn, SharePasswordsOut, ShareTargetIn
-from app.schemas.stats import CreatedSharesOut, MetricOut, RankRowOut, SeriesLineOut, StatsOut
+from app.schemas.stats import MetricOut, RankRowOut, SeriesLineOut, StatsOut
 from app.schemas.transfer import (
     CopyIn,
     CopyOut,
@@ -28,7 +28,6 @@ __all__ = [
     "CopyOut",
     "CopyTargetResultOut",
     "CreateFolderIn",
-    "CreatedSharesOut",
     "DirEntryOut",
     "DownloadTaskOut",
     "FilePathIn",

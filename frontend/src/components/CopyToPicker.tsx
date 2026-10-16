@@ -94,6 +94,12 @@ export default function CopyToPicker({
     () => entries.filter((entry) => entry.is_dir).slice().sort((left, right) => left.name.localeCompare(right.name, "zh-CN")),
     [entries],
   );
+  const selectable = useMemo(
+    () => folders.filter((folder) => !isSelfOrDescendant(sourcePath, folder.path)),
+    [folders, sourcePath],
+  );
+  const allSelectableChecked =
+    selectable.length > 0 && selectable.every((folder) => Boolean(checked[folder.path]));
   const parent = parentOf(view);
 
   function open(path: string, folderName?: string) {
@@ -120,9 +126,18 @@ export default function CopyToPicker({
     });
   }
 
+  function toggleAll() {
+    if (pending || selectable.length === 0) return;
+    if (allSelectableChecked) {
+      setChecked({});
+      return;
+    }
+    setChecked(Object.fromEntries(selectable.map((folder) => [folder.path, folder])));
+  }
+
   return (
     <div
-      className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4 py-6"
+      className="fixed inset-0 z-30 flex items-center justify-center bg-[#101828]/40 px-4 py-6"
       onClick={() => {
         if (!pending) onCancel();
       }}
@@ -131,49 +146,66 @@ export default function CopyToPicker({
         role="dialog"
         aria-modal="true"
         aria-labelledby="copy-to-title"
-        className="flex max-h-full w-full max-w-lg flex-col rounded-2xl border border-line bg-white p-6"
+        className="flex max-h-[calc(100vh-3rem)] w-full max-w-lg min-h-0 flex-col overflow-hidden rounded-2xl border border-line bg-white"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between">
-          <h2 id="copy-to-title" className="text-xl font-semibold text-[#1f2430]">
-            复制到
-          </h2>
-          <button type="button" aria-label="关闭" disabled={pending} onClick={onCancel} className="grid h-8 w-8 place-items-center text-xl text-[#98a2b3] disabled:opacity-40">
-            ×
-          </button>
-        </div>
-        <p className="mt-2 text-sm text-[#667085]">
-          将「{sourceName}」复制到同级目录。进入父目录后勾选一个或多个子文件夹。
-        </p>
+        <div className="shrink-0 px-6 pt-6">
+          <div className="flex items-center justify-between">
+            <h2 id="copy-to-title" className="text-xl font-semibold text-[#1f2430]">
+              复制到
+            </h2>
+            <button type="button" aria-label="关闭" disabled={pending} onClick={onCancel} className="grid h-8 w-8 place-items-center text-xl text-[#98a2b3] disabled:opacity-40">
+              ×
+            </button>
+          </div>
+          <p className="mt-2 text-sm text-[#667085]">
+            将「{sourceName}」复制到同级目录。进入父目录后勾选一个或多个子文件夹。
+          </p>
 
-        <div className="mt-4 flex items-center gap-3 border-b border-[#eef0f4] pb-3 text-sm">
-          <button
-            type="button"
-            disabled={pending || locked || (trail.length <= 1 && parent === null)}
-            onClick={() => {
-              const previous = trail[trail.length - 2];
-              if (previous) open(previous.path);
-            }}
-            className="text-[#98a2b3] disabled:opacity-35"
-          >
-            〈 返回
-          </button>
-          <nav className="flex min-w-0 flex-wrap items-center gap-1 font-medium text-[#1f2430]">
-            {trail.map((crumb, index) => (
-              <span key={crumb.path} className="flex items-center gap-1">
-                {index > 0 ? <span className="text-[#d0d5dd]">/</span> : null}
-                <button type="button" disabled={pending || locked} onClick={() => open(crumb.path)}>
-                  {crumb.name}
-                </button>
-              </span>
-            ))}
-          </nav>
+          <div className="mt-4 flex items-center gap-3 border-b border-[#eef0f4] pb-3 text-sm">
+            <button
+              type="button"
+              disabled={pending || locked || (trail.length <= 1 && parent === null)}
+              onClick={() => {
+                const previous = trail[trail.length - 2];
+                if (previous) open(previous.path);
+              }}
+              className="text-[#98a2b3] disabled:opacity-35"
+            >
+              〈 返回
+            </button>
+            <nav className="flex min-w-0 flex-wrap items-center gap-1 font-medium text-[#1f2430]">
+              {trail.map((crumb, index) => (
+                <span key={crumb.path} className="flex items-center gap-1">
+                  {index > 0 ? <span className="text-[#d0d5dd]">/</span> : null}
+                  <button type="button" disabled={pending || locked} onClick={() => open(crumb.path)}>
+                    {crumb.name}
+                  </button>
+                </span>
+              ))}
+            </nav>
+          </div>
+          {locked ? <p className="mt-2 text-xs text-[#98a2b3]">已勾选目录时不能切换层级，清空勾选后可继续浏览。</p> : null}
         </div>
-        {locked ? <p className="mt-2 text-xs text-[#98a2b3]">已勾选目录时不能切换层级，清空勾选后可继续浏览。</p> : null}
 
-        <div className="mt-2 min-h-64 flex-1 overflow-y-auto">
+        <div className="mt-2 min-h-0 flex-1 overflow-y-auto px-6">
           {loading ? <p className="px-2 py-8 text-sm text-[#98a2b3]">正在读取目录</p> : null}
           {!loading && folders.length === 0 ? <p className="px-2 py-8 text-sm text-[#98a2b3]">这个目录下没有文件夹</p> : null}
+          {!loading && folders.length > 0 ? (
+            <label className="flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2 text-sm text-[#344054] hover:bg-[#fafafa]">
+              <input
+                type="checkbox"
+                checked={allSelectableChecked}
+                disabled={pending || selectable.length === 0}
+                aria-label="全选当前同级目录"
+                onChange={toggleAll}
+              />
+              <span className="font-medium">全选</span>
+              <span className="text-xs text-[#98a2b3]">
+                {selectable.length}/{folders.length} 可选
+              </span>
+            </label>
+          ) : null}
           {!loading
             ? folders.map((folder) => {
                 const blocked = isSelfOrDescendant(sourcePath, folder.path);
@@ -211,34 +243,36 @@ export default function CopyToPicker({
             : null}
         </div>
 
-        {loadError ? <p className="mt-2 text-sm text-danger">{loadError}</p> : null}
-        {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
-        {failures.length > 0 ? (
-          <ul className="mt-2 max-h-28 overflow-y-auto rounded-xl bg-[#fef3f2] px-3 py-2 text-sm text-[#b42318]">
-            {failures.map((row) => (
-              <li key={row.path}>
-                {row.path}：{row.error || "复制失败"}
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        <div className="shrink-0 px-6 pb-6 pt-3">
+          {loadError ? <p className="mb-2 text-sm text-danger">{loadError}</p> : null}
+          {error ? <p className="mb-2 text-sm text-danger">{error}</p> : null}
+          {failures.length > 0 ? (
+            <ul className="mb-2 max-h-24 overflow-y-auto rounded-xl bg-[#fef3f2] px-3 py-2 text-sm text-[#b42318]">
+              {failures.map((row) => (
+                <li key={row.path}>
+                  {row.path}：{row.error || "复制失败"}
+                </li>
+              ))}
+            </ul>
+          ) : null}
 
-        <div className="mt-3 rounded-xl bg-[#f7f8fa] px-4 py-3 text-sm text-[#98a2b3]">
-          已选 <span className="font-medium text-[#344054]">{selectedCount}</span> 个
-        </div>
+          <div className="rounded-xl bg-[#f7f8fa] px-4 py-3 text-sm text-[#98a2b3]">
+            已选 <span className="font-medium text-[#344054]">{selectedCount}</span> 个
+          </div>
 
-        <div className="mt-5 flex justify-end gap-3">
-          <button type="button" disabled={pending} onClick={onCancel} className="h-10 rounded-xl border border-[#e4e7ee] px-4 text-sm disabled:opacity-40">
-            取消
-          </button>
-          <button
-            type="button"
-            disabled={pending || selectedCount === 0}
-            onClick={() => onConfirm(Object.keys(checked))}
-            className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {pending ? "正在复制" : "开始复制"}
-          </button>
+          <div className="mt-4 flex justify-end gap-3">
+            <button type="button" disabled={pending} onClick={onCancel} className="h-10 rounded-xl border border-[#e4e7ee] px-4 text-sm disabled:opacity-40">
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={pending || selectedCount === 0}
+              onClick={() => onConfirm(Object.keys(checked))}
+              className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {pending ? "正在复制" : "开始复制"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

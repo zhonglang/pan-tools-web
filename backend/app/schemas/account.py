@@ -19,6 +19,7 @@ class AccountOut(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    last_synced_at: datetime | None = None
 
 
 class BaiduLoginStartIn(BaseModel):

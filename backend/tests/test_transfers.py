@@ -265,6 +265,7 @@ def test_create_folder_returns_the_new_path(client):
         "path": "/毕业照/新相册",
         "is_dir": True,
         "size": None,
+        "created_at": None,
         "modified_at": None,
         "fs_id": None,
     }
@@ -475,6 +476,63 @@ def test_download_name_keeps_the_clicked_folder():
 
     assert unquote(safe_attachment_name("毕业照/子目录/说明.txt", "说明.txt")) == "毕业照／子目录／说明.txt"
     assert unquote(safe_attachment_name("../秘密", "说明.txt")) == "说明.txt"
+
+
+def test_transfer_stores_the_folder_name_separately_from_the_id(client):
+    register(client)
+    account_id = bind(client)
+    install(client, list_ok)
+    created = client.post("/api/transfers", json={
+        "account_id": account_id,
+        "directory": "/308b540179274ef7b2dd6713da9f5180",
+        "directory_label": "根目录 / 我的资料",
+        "links": "https://pan.baidu.com/s/1AbCdEf ab12",
+    })
+    assert created.status_code == 201
+    assert created.json()["directory"] == "/308b540179274ef7b2dd6713da9f5180"
+    assert created.json()["directory_label"] == "根目录 / 我的资料"
+    listed = client.get("/api/jobs")
+    assert listed.json()[0]["directory_label"] == "根目录 / 我的资料"
+    assert listed.json()[0]["directory"] == "/308b540179274ef7b2dd6713da9f5180"
+
+
+def test_running_transfer_is_visible_before_the_batch_finishes(client):
+    register(client)
+    account_id = bind(client)
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "xpan/file" in url:
+            return httpx.Response(200, json={"errno": 0, "list": []})
+        if "gettemplatevariable" in url:
+            return httpx.Response(200, json={"errno": 0, "result": {"bdstoken": "bd-token"}})
+        if "share/verify" in url:
+            return httpx.Response(200, json={"errno": 0, "randsk": "rand-sk"})
+        if "share/list" in url:
+            return httpx.Response(200, json={"errno": 0, "share_id": 9, "uk": 8, "list": [{"fs_id": 11}]})
+        if "share/transfer" in url:
+            with client.app.state.session_factory() as other:
+                job = other.scalars(select(Job)).one()
+                item = other.scalars(select(JobItem)).one()
+                seen["job"] = job.status
+                seen["item"] = item.status
+            return httpx.Response(200, json={"errno": 0})
+        raise AssertionError(url)
+
+    install(client, handler)
+    created = client.post("/api/transfers", json={
+        "account_id": account_id,
+        "directory": "/",
+        "links": "https://pan.baidu.com/s/1AbCdEf ab12",
+    })
+    assert created.status_code == 201
+    with client.app.state.session_factory() as session:
+        execute_job(session, client.app.state.pan_http_client, session.get(Job, created.json()["id"]), sleeper=lambda _seconds: None, now=NOW)
+        session.commit()
+    assert seen == {"job": "running", "item": "pending"}
+    shown = client.get(f"/api/jobs/{created.json()['id']}")
+    assert shown.json()["status"] == "succeeded"
 
 
 def test_job_list_shows_created_transfers(client):

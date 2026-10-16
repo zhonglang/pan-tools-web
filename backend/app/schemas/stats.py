@@ -15,6 +15,7 @@ class RankRowOut(BaseModel):
     created_at: datetime
     views: int | None
     transfers: int | None
+    transfer_delta: int | None = None
     downloads: int | None
 
 
@@ -22,13 +23,7 @@ class SeriesLineOut(BaseModel):
     account_id: int
     account_name: str
     values: list[int | None]
-
-
-class CreatedSharesOut(BaseModel):
-    page: int
-    page_size: int
-    total: int
-    rows: list[RankRowOut]
+    kind: str | None = None
 
 
 class StatsOut(BaseModel):

@@ -14,7 +14,7 @@ from app.crud.accounts import get_for_user
 from app.crud.downloads import get as get_download
 from app.crud.downloads import list_for_user as list_user_downloads
 from app.crud.jobs import add as add_job
-from app.crud.jobs import add_item, get_for_user as get_job_for_user, items_for, list_for_user as list_user_jobs
+from app.crud.jobs import add_item, get_for_user as get_job_for_user, items_for, summaries_for_user
 from app.models import DownloadTask, Job, JobItem, PanAccount, User
 from app.services.links import canonical_input, parse_share_link, share_chunks
 from app.services.downloads import cancel_save, start_save
@@ -93,6 +93,12 @@ def remember_cookie(session: Session, account: PanAccount, cookie: str, warmed: 
     session.commit()
 
 
+def persist_warmed(session: Session, account: PanAccount, cookie: str, adapter) -> None:
+    warmed = getattr(adapter, "warmed", None)
+    if isinstance(warmed, str):
+        remember_cookie(session, account, cookie, warmed)
+
+
 def to_job(job: Job, items: list[JobItem]) -> JobOut:
     return JobOut(
         id=job.id,
@@ -129,8 +135,10 @@ def list_files(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="目标目录无效") from exc
     cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
+    adapter = adapter_for(account.provider, pan_client(request))
     try:
-        entries = adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
+        entries = adapter.list_dir(cookie, directory)
+        persist_warmed(session, account, cookie, adapter)
         if account.status != "valid":
             account.status = "valid"
             account.updated_at = now_utc()
@@ -233,7 +241,7 @@ def open_adapter(session: Session, account: PanAccount, request: Request):
         account.status = "expired"
         account.updated_at = now_utc()
         session.commit()
-        raise HTTPException(status_code=422, detail="请重新登录百度") from exc
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     remember_cookie(session, account, cookie, warmed)
     return adapter, warmed
 
@@ -252,6 +260,7 @@ def rename_file(
     adapter, cookie = open_adapter(session, account, request)
     try:
         adapter.rename(cookie, path, name)
+        persist_warmed(session, account, cookie, adapter)
     except DuplicateName as exc:
         raise HTTPException(status_code=422, detail="已有同名文件") from exc
     except PathNotFound as exc:
@@ -279,6 +288,7 @@ def delete_file(
     adapter, cookie = open_adapter(session, account, request)
     try:
         adapter.delete(cookie, path)
+        persist_warmed(session, account, cookie, adapter)
     except PathNotFound as exc:
         raise HTTPException(status_code=422, detail="文件不存在") from exc
     except LoginRejected as exc:
@@ -343,6 +353,7 @@ def copy_files(
         results.append(
             CopyTargetResultOut(path=dest, name=placed or name, ok=placed is not None, error=error)
         )
+    persist_warmed(session, account, cookie, adapter)
     return CopyOut(
         succeeded=sum(1 for row in results if row.ok),
         failed=sum(1 for row in results if not row.ok),
@@ -367,6 +378,7 @@ def share_file(
             url, password = created
         else:
             url = created
+        persist_warmed(session, account, cookie, adapter)
     except LoginRejected as exc:
         account.status = "expired"
         account.updated_at = now_utc()
@@ -395,6 +407,7 @@ def download_file(
     filename = safe_attachment_name(name, target.rsplit("/", 1)[-1])
     try:
         stream = adapter.open_download(cookie, target)
+        persist_warmed(session, account, cookie, adapter)
     except NotAFile as exc:
         raise HTTPException(status_code=422, detail="文件夹请进入后下载其中的文件") from exc
     except PathNotFound as exc:
@@ -423,6 +436,7 @@ def safe_attachment_name(requested: str | None, fallback: str) -> str:
 def folder_download(adapter: BaiduAdapter, cookie: str, target: str, session: Session, account: PanAccount) -> StreamingResponse:
     try:
         planned = archive_entries(adapter, cookie, target)
+        persist_warmed(session, account, cookie, adapter)
     except FolderTooLarge as exc:
         raise HTTPException(status_code=422, detail="目录里的文件太多，请进入下一级再下载") from exc
     except PathNotFound as exc:
@@ -521,8 +535,10 @@ def create_transfer(
     moment = body.now or now_utc()
     if directory != "/":
         cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
+        adapter = adapter_for(account.provider, pan_client(request))
         try:
-            adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
+            adapter.list_dir(cookie, directory)
+            persist_warmed(session, account, cookie, adapter)
         except LoginRejected as exc:
             account.status = "expired"
             account.updated_at = moment
@@ -573,24 +589,20 @@ def create_transfer(
 
 @router.get("/api/jobs", response_model=list[JobSummaryOut])
 def list_jobs(user: User = Depends(get_current_user), session: Session = Depends(get_db)):
-    jobs = list_user_jobs(session, user.id)
-    summaries: list[JobSummaryOut] = []
-    for job in jobs:
-        items = items_for(session, job.id)
-        summaries.append(
-            JobSummaryOut(
-                id=job.id,
-                type=job.type,
-                status=job.status,
-                directory=job.directory,
-                directory_label=job.directory_label,
-                created_at=job.created_at,
-                total=len(items),
-                succeeded=sum(item.status == "succeeded" for item in items),
-                failed=sum(item.status == "failed" for item in items),
-            )
+    return [
+        JobSummaryOut(
+            id=job.id,
+            type=job.type,
+            status=job.status,
+            directory=job.directory,
+            directory_label=job.directory_label,
+            created_at=job.created_at,
+            total=total,
+            succeeded=succeeded,
+            failed=failed,
         )
-    return summaries
+        for job, total, succeeded, failed in summaries_for_user(session, user.id)
+    ]
 
 
 @router.get("/api/jobs/{job_id}", response_model=JobOut)
