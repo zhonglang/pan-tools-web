@@ -107,6 +107,22 @@ export type DownloadTask = {
   created_at: string;
 };
 
+export type UploadTask = {
+  id: number;
+  account_id: number;
+  dest_path: string;
+  name: string;
+  status: "running" | "done" | "failed" | "cancelled" | string;
+  bytes_done: number;
+  bytes_total: number;
+  files_done: number;
+  files_total: number;
+  current_name: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type LibraryItem = {
   id: number;
   prefix: string;
@@ -158,6 +174,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: "请求失败" }));
     throw new Error(typeof body.detail === "string" ? body.detail : "请求失败");
+  }
+  return response.json();
+}
+
+async function requestForm<T>(path: string, body: FormData): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    body,
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: "请求失败" }));
+    throw new Error(typeof payload.detail === "string" ? payload.detail : "请求失败");
   }
   return response.json();
 }
@@ -290,6 +319,19 @@ export const api = {
     }),
   downloads: () => request<DownloadTask[]>("/api/downloads"),
   cancelDownload: (id: number) => request<DownloadTask>(`/api/downloads/${id}/cancel`, { method: "POST" }),
+  uploadFiles: (accountId: number, dest: string, files: File[]) => {
+    const body = new FormData();
+    body.append("dest", dest);
+    for (const file of files) {
+      const relative =
+        (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+      body.append("relative_paths", relative);
+      body.append("files", file, file.name);
+    }
+    return requestForm<UploadTask>(`/api/accounts/${accountId}/files/upload`, body);
+  },
+  uploads: () => request<UploadTask[]>("/api/uploads"),
+  cancelUpload: (id: number) => request<UploadTask>(`/api/uploads/${id}/cancel`, { method: "POST" }),
   jobs: () => request<JobSummary[]>("/api/jobs"),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   syncAccount: (accountId: number) => request<Job>(`/api/accounts/${accountId}/sync`, { method: "POST" }),

@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, type CopyTargetResult, type DirEntry, type DownloadTask, type PanAccount, type User } from "../api";
+import {
+  api,
+  type CopyTargetResult,
+  type DirEntry,
+  type DownloadTask,
+  type PanAccount,
+  type UploadTask,
+  type User,
+} from "../api";
 import { planBatchRename, type BatchRenameSide } from "../batchRename";
 import AccountRail from "../components/AccountRail";
 import CopyToPicker from "../components/CopyToPicker";
@@ -25,6 +33,13 @@ function downloadLabel(task: DownloadTask) {
   if (task.status === "done") return `已保存到 ${task.directory ?? task.name}`;
   if (task.status === "cancelled") return `已取消「${task.name}」`;
   return task.error || "下载失败";
+}
+
+function uploadLabel(task: UploadTask) {
+  if (task.status === "running") return `正在上传「${task.name}」`;
+  if (task.status === "done") return `已上传「${task.name}」`;
+  if (task.status === "cancelled") return `已取消「${task.name}」`;
+  return task.error || "上传失败";
 }
 
 type TableSort = { key: "name" | "created" | "modified"; dir: "asc" | "desc" };
@@ -227,6 +242,13 @@ export default function TransferPage({ user }: { user: User }) {
   const [mkdirName, setMkdirName] = useState("");
   const [mkdirPending, setMkdirPending] = useState(false);
   const [downloads, setDownloads] = useState<DownloadTask[]>([]);
+  const [uploads, setUploads] = useState<UploadTask[]>([]);
+  const [uploadMenu, setUploadMenu] = useState(false);
+  const [uploadChooserDest, setUploadChooserDest] = useState<string | null>(null);
+  const uploadDestRef = useRef("/");
+  const uploadFileInput = useRef<HTMLInputElement>(null);
+  const uploadFolderInput = useRef<HTMLInputElement>(null);
+  const prevUploadStatus = useRef<Record<number, string>>({});
   const [checked, setChecked] = useState<Record<string, DirEntry>>({});
   const [period, setPeriod] = useState(0);
   const [shareDefaults, setShareDefaults] = useState({ baidu: "", quark: "", xunlei: "" });
@@ -292,6 +314,7 @@ export default function TransferPage({ user }: { user: User }) {
   }, [user.paid_features]);
 
   const hasRunningDownloads = downloads.some((task) => task.status === "running");
+  const hasRunningUploads = uploads.some((task) => task.status === "running");
 
   useEffect(() => {
     let stopped = false;
@@ -316,6 +339,39 @@ export default function TransferPage({ user }: { user: User }) {
       window.clearTimeout(timer);
     };
   }, [hasRunningDownloads]);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    async function tick() {
+      try {
+        const rows = await api.uploads();
+        if (stopped) return;
+        const previous = prevUploadStatus.current;
+        let refresh = false;
+        for (const row of rows) {
+          const before = previous[row.id];
+          if (before === "running" && row.status === "done") refresh = true;
+          if (before === "running" && row.status === "failed" && row.error) setError(row.error);
+          previous[row.id] = row.status;
+        }
+        setUploads(rows);
+        if (refresh) setReloadKey((value) => value + 1);
+        if (rows.some((row) => row.status === "running")) {
+          timer = window.setTimeout(tick, 1000);
+        }
+      } catch {
+        if (!stopped && hasRunningUploads) {
+          timer = window.setTimeout(tick, 4000);
+        }
+      }
+    }
+    void tick();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [hasRunningUploads]);
 
   useEffect(() => {
     if (accountId === null || !canBrowse) {
@@ -439,6 +495,42 @@ export default function TransferPage({ user }: { user: User }) {
     try {
       const task = await api.cancelDownload(id);
       setDownloads((current) => current.map((item) => (item.id === id ? task : item)));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "取消失败");
+    }
+  }
+
+  function openUploadPicker(dest: string, kind: "file" | "folder") {
+    if (!canBrowse || accountId === null) {
+      setError("请先选择有效网盘账号");
+      return;
+    }
+    uploadDestRef.current = dest;
+    setUploadMenu(false);
+    if (kind === "folder") uploadFolderInput.current?.click();
+    else uploadFileInput.current?.click();
+  }
+
+  async function onUploadSelected(fileList: FileList | null) {
+    if (accountId === null || !fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+    setError("");
+    try {
+      const task = await api.uploadFiles(accountId, uploadDestRef.current, files);
+      prevUploadStatus.current[task.id] = task.status;
+      setUploads((current) => [task, ...current.filter((row) => row.id !== task.id)]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "上传失败");
+    } finally {
+      if (uploadFileInput.current) uploadFileInput.current.value = "";
+      if (uploadFolderInput.current) uploadFolderInput.current.value = "";
+    }
+  }
+
+  async function cancelUpload(id: number) {
+    try {
+      const task = await api.cancelUpload(id);
+      setUploads((current) => current.map((item) => (item.id === id ? task : item)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "取消失败");
     }
@@ -786,6 +878,34 @@ export default function TransferPage({ user }: { user: User }) {
           >
             新建目录
           </button>
+          <div className="relative">
+            <button
+              type="button"
+              disabled={!canBrowse || accountId === null}
+              onClick={() => setUploadMenu((open) => !open)}
+              className="inline-flex h-9 shrink-0 items-center justify-center rounded-full border border-[#e4e7ee] bg-white px-4 text-sm font-medium text-[#344054] disabled:opacity-40"
+            >
+              上传
+            </button>
+            {uploadMenu ? (
+              <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-xl border border-[#e4e7ee] bg-white py-1 shadow-lg">
+                <button
+                  type="button"
+                  className="block w-full px-3 py-2 text-left text-sm text-[#344054] hover:bg-muted"
+                  onClick={() => openUploadPicker(directory, "file")}
+                >
+                  上传文件
+                </button>
+                <button
+                  type="button"
+                  className="block w-full px-3 py-2 text-left text-sm text-[#344054] hover:bg-muted"
+                  onClick={() => openUploadPicker(directory, "folder")}
+                >
+                  上传文件夹
+                </button>
+              </div>
+            ) : null}
+          </div>
           <button
             type="button"
             onClick={() => setReloadKey((value) => value + 1)}
@@ -795,6 +915,21 @@ export default function TransferPage({ user }: { user: User }) {
             ↻
           </button>
         </div>
+        <input
+          ref={uploadFileInput}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(event) => void onUploadSelected(event.target.files)}
+        />
+        <input
+          ref={uploadFolderInput}
+          type="file"
+          multiple
+          className="hidden"
+          {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+          onChange={(event) => void onUploadSelected(event.target.files)}
+        />
 
         <div className="flex items-center gap-3 border-b border-[#eef0f4] bg-white px-4 py-2.5 text-sm text-[#344054]">
           <button
@@ -1072,6 +1207,20 @@ export default function TransferPage({ user }: { user: User }) {
                             >
                               下载
                             </button>
+                            {entry.is_dir ? (
+                              <button
+                                type="button"
+                                className="text-[#0e7490] disabled:opacity-40"
+                                disabled={!canBrowse || busyPath === entry.path}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setUploadChooserDest(entry.path);
+                                }}
+                                onDoubleClick={(event) => event.stopPropagation()}
+                              >
+                                上传到此
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               className="text-[#f79009] disabled:opacity-40"
@@ -1473,14 +1622,81 @@ export default function TransferPage({ user }: { user: User }) {
           </div>
         </div>
       ) : null}
-      {downloads.some((task) => task.status === "running") ? (
+      {uploadChooserDest ? (
+        <div
+          className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4"
+          onClick={() => setUploadChooserDest(null)}
+        >
+          <div
+            role="dialog"
+            className="w-full max-w-xs rounded-2xl bg-white p-4 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <p className="text-sm font-medium text-ink">上传到此目录</p>
+            <p className="mt-1 break-all text-xs text-[#667085]">{uploadChooserDest}</p>
+            <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                className="h-10 rounded-xl bg-ink text-sm font-medium text-white"
+                onClick={() => {
+                  const dest = uploadChooserDest;
+                  setUploadChooserDest(null);
+                  openUploadPicker(dest, "file");
+                }}
+              >
+                上传文件
+              </button>
+              <button
+                type="button"
+                className="h-10 rounded-xl border border-[#e4e7ee] text-sm font-medium text-[#344054]"
+                onClick={() => {
+                  const dest = uploadChooserDest;
+                  setUploadChooserDest(null);
+                  openUploadPicker(dest, "folder");
+                }}
+              >
+                上传文件夹
+              </button>
+              <button type="button" className="h-10 text-sm text-[#667085]" onClick={() => setUploadChooserDest(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {downloads.some((task) => task.status === "running") || uploads.some((task) => task.status === "running") ? (
         <div className="fixed bottom-5 right-5 z-30 flex w-80 flex-col gap-3">
+          {uploads
+            .filter((task) => task.status === "running")
+            .map((task) => {
+              const percent = task.bytes_total > 0 ? Math.min(100, Math.round((task.bytes_done / task.bytes_total) * 100)) : 0;
+              return (
+                <div key={`upload-${task.id}`} className="rounded-2xl bg-white px-4 py-3 border border-line">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="break-all text-sm font-medium text-[#1f2430]">{uploadLabel(task)}</p>
+                    <button type="button" onClick={() => void cancelUpload(task.id)} className="shrink-0 text-sm text-[#f04438]">
+                      取消
+                    </button>
+                  </div>
+                  {task.bytes_total > 0 ? (
+                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#eaecf0]">
+                      <div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} />
+                    </div>
+                  ) : null}
+                  <p className="mt-2 break-all text-xs text-[#667085]">
+                    {formatBytes(task.bytes_done)} / {formatBytes(task.bytes_total)} · {task.files_done}/{task.files_total}
+                    {task.current_name ? ` · ${task.current_name}` : ""}
+                    <span className="block text-[#98a2b3]">{task.dest_path}</span>
+                  </p>
+                </div>
+              );
+            })}
           {downloads
             .filter((task) => task.status === "running")
             .map((task) => {
               const percent = task.bytes_total > 0 ? Math.min(100, Math.round((task.bytes_done / task.bytes_total) * 100)) : 0;
               return (
-                <div key={task.id} className="rounded-2xl bg-white px-4 py-3 border border-line">
+                <div key={`download-${task.id}`} className="rounded-2xl bg-white px-4 py-3 border border-line">
                   <div className="flex items-start justify-between gap-3">
                     <p className="break-all text-sm font-medium text-[#1f2430]">{downloadLabel(task)}</p>
                     <button type="button" onClick={() => void cancelDownload(task.id)} className="shrink-0 text-sm text-[#f04438]">
@@ -1500,9 +1716,11 @@ export default function TransferPage({ user }: { user: User }) {
                 </div>
               );
             })}
-          <Link to="/downloads" className="rounded-2xl bg-white px-4 py-2 text-center text-sm text-primary border border-line">
-            查看下载记录
-          </Link>
+          {downloads.some((task) => task.status === "running") ? (
+            <Link to="/downloads" className="rounded-2xl bg-white px-4 py-2 text-center text-sm text-primary border border-line">
+              查看下载记录
+            </Link>
+          ) : null}
         </div>
       ) : null}
       {shareOpen ? (
