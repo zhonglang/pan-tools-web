@@ -1,11 +1,26 @@
+import base64
+import hashlib
+import json
+import mimetypes
 import re
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import format_datetime
 
 import httpx
 
 from app.pans.baidu import DirEntry, DownloadStream
-from app.pans.errors import DuplicateName, InvalidLink, LoginRejected, PathNotFound, RateLimited, TransferFailed, WrongPassword
+from app.pans.errors import (
+    DuplicateName,
+    InvalidLink,
+    LoginRejected,
+    PathNotFound,
+    RateLimited,
+    TransferFailed,
+    UploadCancelled,
+    WrongPassword,
+)
 
 BASE = "https://drive-pc.quark.cn/1/clouddrive"
 PARAMS = {"pr": "ucpro", "fr": "pc"}
@@ -173,7 +188,160 @@ class QuarkAdapter:
         on_progress=None,
         should_stop=None,
     ) -> None:
-        raise TransferFailed("上传尚未实现")
+        if should_stop and should_stop():
+            raise UploadCancelled()
+        data = stream.read()
+        if size and len(data) != size:
+            raise TransferFailed("文件大小不一致")
+        actual = len(data)
+        md5_hex = hashlib.md5(data).hexdigest()
+        sha1_hex = hashlib.sha1(data).hexdigest()
+        mime, _ = mimetypes.guess_type(filename)
+        mime = mime or "application/octet-stream"
+        now_ms = int(time.time() * 1000)
+        pre = self._post(
+            "/file/upload/pre",
+            cookie,
+            {
+                "ccp_hash_update": True,
+                "dir_name": "",
+                "file_name": filename,
+                "format_type": mime,
+                "l_created_at": now_ms,
+                "l_updated_at": now_ms,
+                "pdir_fid": _fid(dest_dir),
+                "size": actual,
+            },
+        )
+        pre_data = pre.get("data") if isinstance(pre.get("data"), dict) else {}
+        task_id = pre_data.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise TransferFailed()
+        hashed = self._post("/file/update/hash", cookie, {"md5": md5_hex, "sha1": sha1_hex, "task_id": task_id})
+        hash_data = hashed.get("data") if isinstance(hashed.get("data"), dict) else {}
+        if hash_data.get("finish") is True:
+            if on_progress:
+                on_progress(actual)
+            return
+        metadata = pre.get("metadata") if isinstance(pre.get("metadata"), dict) else {}
+        part_size = metadata.get("part_size")
+        if not isinstance(part_size, int) or part_size <= 0:
+            part_size = 4 * 1024 * 1024
+        etags: list[str] = []
+        part_number = 1
+        offset = 0
+        while offset < actual:
+            if should_stop and should_stop():
+                raise UploadCancelled()
+            chunk = data[offset : offset + part_size]
+            etag = self._upload_part(cookie, pre_data, mime, part_number, chunk)
+            etags.append(etag)
+            offset += len(chunk)
+            if on_progress:
+                on_progress(len(chunk))
+            part_number += 1
+        self._upload_commit(cookie, pre_data, etags)
+        self._post("/file/upload/finish", cookie, {"obj_key": pre_data.get("obj_key"), "task_id": task_id})
+
+    def _upload_auth(self, cookie: str, auth_info: object, auth_meta: str, task_id: str) -> str:
+        payload = self._post(
+            "/file/upload/auth",
+            cookie,
+            {"auth_info": auth_info, "auth_meta": auth_meta, "task_id": task_id},
+        )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        key = data.get("auth_key")
+        if not isinstance(key, str) or not key:
+            raise TransferFailed()
+        return key
+
+    def _oss_url(self, pre_data: dict) -> str:
+        bucket = pre_data.get("bucket")
+        upload_url = pre_data.get("upload_url")
+        obj_key = pre_data.get("obj_key")
+        if not isinstance(bucket, str) or not isinstance(upload_url, str) or not isinstance(obj_key, str):
+            raise TransferFailed()
+        host = upload_url[7:] if upload_url.startswith("http://") else upload_url[8:] if upload_url.startswith("https://") else upload_url
+        return f"https://{bucket}.{host}/{obj_key}"
+
+    def _upload_part(self, cookie: str, pre_data: dict, mime: str, part_number: int, chunk: bytes) -> str:
+        now = format_datetime(datetime.now(timezone.utc), usegmt=True)
+        upload_id = pre_data.get("upload_id")
+        bucket = pre_data.get("bucket")
+        obj_key = pre_data.get("obj_key")
+        task_id = pre_data.get("task_id")
+        auth_meta = (
+            f"PUT\n\n{mime}\n{now}\nx-oss-date:{now}\n"
+            f"x-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n"
+            f"/{bucket}/{obj_key}?partNumber={part_number}&uploadId={upload_id}"
+        )
+        auth_key = self._upload_auth(cookie, pre_data.get("auth_info"), auth_meta, str(task_id))
+        try:
+            response = self.client.put(
+                self._oss_url(pre_data),
+                params={"partNumber": str(part_number), "uploadId": str(upload_id)},
+                headers={
+                    "Authorization": auth_key,
+                    "Content-Type": mime,
+                    "Referer": "https://pan.quark.cn/",
+                    "x-oss-date": now,
+                    "x-oss-user-agent": "aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit",
+                },
+                content=chunk,
+                timeout=120,
+            )
+        except Exception as exc:
+            raise TransferFailed() from exc
+        if response.status_code != 200:
+            raise TransferFailed()
+        etag = response.headers.get("ETag") or response.headers.get("Etag")
+        if not etag:
+            raise TransferFailed()
+        return etag
+
+    def _upload_commit(self, cookie: str, pre_data: dict, etags: list[str]) -> None:
+        now = format_datetime(datetime.now(timezone.utc), usegmt=True)
+        parts = "".join(
+            f"<Part><PartNumber>{index}</PartNumber><ETag>{etag}</ETag></Part>"
+            for index, etag in enumerate(etags, 1)
+        )
+        xml_body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f"<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>"
+        )
+        content_md5 = base64.b64encode(hashlib.md5(xml_body.encode()).digest()).decode()
+        callback_b64 = base64.b64encode(json.dumps(pre_data.get("callback")).encode()).decode()
+        upload_id = pre_data.get("upload_id")
+        bucket = pre_data.get("bucket")
+        obj_key = pre_data.get("obj_key")
+        task_id = pre_data.get("task_id")
+        auth_meta = (
+            f"POST\n{content_md5}\napplication/xml\n{now}\n"
+            f"x-oss-callback:{callback_b64}\nx-oss-date:{now}\n"
+            f"x-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n"
+            f"/{bucket}/{obj_key}?uploadId={upload_id}"
+        )
+        auth_key = self._upload_auth(cookie, pre_data.get("auth_info"), auth_meta, str(task_id))
+        try:
+            response = self.client.post(
+                self._oss_url(pre_data),
+                params={"uploadId": str(upload_id)},
+                headers={
+                    "Authorization": auth_key,
+                    "Content-MD5": content_md5,
+                    "Content-Type": "application/xml",
+                    "Referer": "https://pan.quark.cn/",
+                    "x-oss-callback": callback_b64,
+                    "x-oss-date": now,
+                    "x-oss-user-agent": "aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit",
+                },
+                content=xml_body.encode(),
+                timeout=60,
+            )
+        except Exception as exc:
+            raise TransferFailed() from exc
+        if response.status_code != 200:
+            raise TransferFailed()
 
     def rename(self, cookie: str, path: str, new_name: str) -> None:
         self._post("/file/rename", cookie, {"fid": _fid(path), "file_name": new_name})

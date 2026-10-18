@@ -1,15 +1,24 @@
 import base64
 import hashlib
+import hmac
 import json
 import time
 from collections.abc import Callable
-from datetime import datetime
-from urllib.parse import urlparse
+from datetime import datetime, timezone
+from urllib.parse import quote, urlparse
 
 import httpx
 
 from app.pans.baidu import DirEntry, DownloadStream
-from app.pans.errors import DuplicateName, InvalidLink, LoginRejected, RateLimited, TransferFailed, WrongPassword
+from app.pans.errors import (
+    DuplicateName,
+    InvalidLink,
+    LoginRejected,
+    RateLimited,
+    TransferFailed,
+    UploadCancelled,
+    WrongPassword,
+)
 
 API = "https://api-pan.xunlei.com/drive/v1"
 AUTH = "https://xluser-ssl.xunlei.com/v1"
@@ -140,7 +149,58 @@ class XunleiAdapter:
         on_progress=None,
         should_stop=None,
     ) -> None:
-        raise TransferFailed("上传尚未实现")
+        if should_stop and should_stop():
+            raise UploadCancelled()
+        data = stream.read()
+        if size and len(data) != size:
+            raise TransferFailed("文件大小不一致")
+        actual = len(data)
+        gcid = _gcid_hex(data)
+        credential = self._live(self._creds(cookie), action="POST:/drive/v1/files")
+        payload = self._send(
+            "POST",
+            f"{API}/files",
+            credential,
+            body={
+                "kind": "drive#file",
+                "parent_id": _fid(dest_dir),
+                "name": filename,
+                "size": actual,
+                "hash": gcid,
+                "upload_type": "UPLOAD_TYPE_RESUMABLE",
+            },
+            action="POST:/drive/v1/files",
+        )
+        if payload.get("upload_type") != "UPLOAD_TYPE_RESUMABLE":
+            if on_progress:
+                on_progress(actual)
+            return
+        resumable = payload.get("resumable") if isinstance(payload.get("resumable"), dict) else {}
+        params = resumable.get("params") if isinstance(resumable.get("params"), dict) else {}
+        bucket = params.get("bucket")
+        key = params.get("key")
+        endpoint = params.get("endpoint")
+        access_key = params.get("access_key_id")
+        secret_key = params.get("access_key_secret")
+        token = params.get("security_token")
+        if not all(isinstance(value, str) and value for value in (bucket, key, endpoint, access_key, secret_key, token)):
+            raise TransferFailed()
+        assert isinstance(bucket, str) and isinstance(key, str) and isinstance(endpoint, str)
+        assert isinstance(access_key, str) and isinstance(secret_key, str) and isinstance(token, str)
+        if should_stop and should_stop():
+            raise UploadCancelled()
+        _s3_put_object(
+            self.client,
+            endpoint=endpoint,
+            bucket=bucket,
+            key=key,
+            access_key=access_key,
+            secret_key=secret_key,
+            session_token=token,
+            body=data,
+        )
+        if on_progress:
+            on_progress(actual)
 
     def rename(self, cookie: str, path: str, new_name: str) -> None:
         credential = self._live(self._creds(cookie))
@@ -595,6 +655,91 @@ def _fid(directory: str) -> str:
     if cleaned in {"", "/"}:
         return ""
     return cleaned.rsplit("/", 1)[-1]
+
+
+def _gcid_hex(data: bytes) -> str:
+    size = len(data)
+    block = 0x40000
+    while size / block > 0x200 and block < 0x200000:
+        block <<= 1
+    outer = hashlib.sha1()
+    offset = 0
+    while offset < size:
+        chunk = data[offset : offset + block]
+        outer.update(hashlib.sha1(chunk).digest())
+        offset += len(chunk)
+    return outer.hexdigest().upper()
+
+
+def _s3_put_object(
+    client: httpx.Client,
+    *,
+    endpoint: str,
+    bucket: str,
+    key: str,
+    access_key: str,
+    secret_key: str,
+    session_token: str,
+    body: bytes,
+) -> None:
+    cleaned = endpoint
+    prefix = f"{bucket}."
+    if cleaned.startswith(prefix):
+        cleaned = cleaned[len(prefix) :]
+    if not cleaned.startswith("http"):
+        cleaned = f"https://{cleaned}"
+    parsed = urlparse(cleaned)
+    host = parsed.netloc
+    path = f"/{bucket}/{quote(key, safe='/')}"
+    amz_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = amz_date[:8]
+    region = "xunlei"
+    service = "s3"
+    payload_hash = hashlib.sha256(body).hexdigest()
+    canonical_headers = (
+        f"host:{host}\n"
+        f"x-amz-content-sha256:{payload_hash}\n"
+        f"x-amz-date:{amz_date}\n"
+        f"x-amz-security-token:{session_token}\n"
+    )
+    signed_headers = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+    canonical_request = f"PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = (
+        f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n"
+        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+    )
+
+    def _sign(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+    signing_key = _sign(
+        _sign(_sign(_sign(("AWS4" + secret_key).encode(), date_stamp), region), service),
+        "aws4_request",
+    )
+    signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    authorization = (
+        f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    url = f"{parsed.scheme}://{host}{path}"
+    try:
+        response = client.put(
+            url,
+            headers={
+                "Authorization": authorization,
+                "x-amz-content-sha256": payload_hash,
+                "x-amz-date": amz_date,
+                "x-amz-security-token": session_token,
+                "Content-Type": "application/octet-stream",
+            },
+            content=body,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise TransferFailed() from exc
+    if response.status_code not in {200, 201}:
+        raise TransferFailed()
 
 
 def _share_id(value: str) -> str:
