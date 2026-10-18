@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -160,3 +160,26 @@ def test_rejects_oversized(db, tmp_path, monkeypatch):
                 dest_path="/",
                 items=[("big.txt", local, 20)],
             )
+
+
+def test_interrupt_upload_orphans(db):
+    factory, user_id, account_id = db
+    with factory() as session:
+        session.add(
+            UploadTask(
+                user_id=user_id,
+                account_id=account_id,
+                dest_path="/",
+                name="残留",
+                status="running",
+                bytes_done=0,
+                bytes_total=1,
+                files_done=0,
+                files_total=1,
+            )
+        )
+        session.commit()
+        uploads_service.interrupt_upload_orphans(session)
+        row = session.scalars(select(UploadTask)).one()
+        assert row.status == "failed"
+        assert row.error == "上传已中断"
