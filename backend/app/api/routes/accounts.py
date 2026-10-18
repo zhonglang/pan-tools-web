@@ -12,7 +12,7 @@ from app.core.crypto import decrypt_cookie, encrypt_cookie
 from app.core.deps import get_current_user, get_db, now_utc
 from app.crud.accounts import add as add_account
 from app.crud.accounts import count_valid, get_for_user, list_for_user
-from app.models import DownloadTask, Job, PanAccount, ShareLink, ShareStatSnapshot, User
+from app.models import DownloadTask, Job, PanAccount, ShareLink, ShareStatSnapshot, UploadTask, User
 from app.services.baidu_login_sessions import LoginSessionStore
 from app.services.membership import account_limit
 from app.pans import LoginRejected, ProviderClosed, adapter_for
@@ -122,7 +122,7 @@ def same_xunlei_account(session: Session, user: User, cookie: str, key: str) -> 
 
 
 def _has_account_history(session: Session, account_id: int) -> bool:
-    for model in (Job, ShareLink, ShareStatSnapshot, DownloadTask):
+    for model in (Job, ShareLink, ShareStatSnapshot, DownloadTask, UploadTask):
         count = session.scalar(select(func.count()).select_from(model).where(model.account_id == account_id))
         if count:
             return True

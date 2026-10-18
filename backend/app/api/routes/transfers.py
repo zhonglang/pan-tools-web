@@ -1,9 +1,11 @@
 import secrets
 import string
+import tempfile
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -15,10 +17,13 @@ from app.crud.downloads import get as get_download
 from app.crud.downloads import list_for_user as list_user_downloads
 from app.crud.jobs import add as add_job
 from app.crud.jobs import add_item, get_for_user as get_job_for_user, items_for, summaries_for_user
-from app.models import DownloadTask, Job, JobItem, PanAccount, User
+from app.crud.uploads import get as get_upload
+from app.crud.uploads import list_for_user as list_user_uploads
+from app.models import DownloadTask, Job, JobItem, PanAccount, UploadTask, User
 from app.services.links import canonical_input, parse_share_link, share_chunks
 from app.services.downloads import cancel_save, start_save
 from app.services.folder_download import FolderTooLarge, archive_body, archive_entries
+from app.services.uploads import cancel_upload, start_upload, upload_max_bytes
 from app.pans import adapter_for
 from app.pans.baidu import BaiduAdapter
 from app.pans.errors import DuplicateName, LoginRejected, NotAFile, PathNotFound, TransferFailed
@@ -40,6 +45,7 @@ from app.schemas import (
     ShareIn,
     ShareOut,
     TransferIn,
+    UploadTaskOut,
 )
 from app.services.copying import MAX_RENAME_ATTEMPTS, next_copy_name, validate_targets
 from app.services.transfers import clean_directory_label, normalize_directory
@@ -514,6 +520,98 @@ def cancel_download(task_id: int, user: User = Depends(get_current_user), sessio
     if task is None or task.user_id != user.id:
         raise HTTPException(status_code=404, detail="下载任务不存在")
     return to_download(cancel_save(session, task))
+
+
+def to_upload(task: UploadTask) -> UploadTaskOut:
+    return UploadTaskOut.model_validate(task)
+
+
+@router.post("/api/accounts/{account_id}/files/upload", response_model=UploadTaskOut, status_code=201)
+async def upload_files(
+    account_id: int,
+    request: Request,
+    dest: str = Form(...),
+    files: list[UploadFile] = File(...),
+    relative_paths: list[str] | None = Form(None),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    account = owned_drive(session, user, account_id, allow_expired=True)
+    try:
+        dest_path = normalize_directory(dest)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="目标目录无效") from exc
+    if not files:
+        raise HTTPException(status_code=422, detail="请选择文件")
+    paths = relative_paths or []
+    if paths and len(paths) != len(files):
+        raise HTTPException(status_code=422, detail="相对路径数量不匹配")
+    temp_root = Path(tempfile.mkdtemp(prefix="pan-upload-"))
+    items: list[tuple[str, Path, int]] = []
+    total = 0
+    try:
+        for index, upload in enumerate(files):
+            relative = (paths[index] if index < len(paths) else None) or upload.filename or f"file-{index}"
+            relative = relative.replace("\\", "/").lstrip("/")
+            if not relative or ".." in relative.split("/"):
+                raise HTTPException(status_code=422, detail="文件路径无效")
+            local = temp_root / f"{index}-{Path(relative).name}"
+            size = 0
+            with open(local, "wb") as handle:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    total += len(chunk)
+                    if total > upload_max_bytes():
+                        raise HTTPException(status_code=422, detail="文件过大")
+                    handle.write(chunk)
+            if size == 0:
+                raise HTTPException(status_code=422, detail="不能上传空文件")
+            items.append((relative, local, size))
+    except HTTPException:
+        for _rel, path, _size in items:
+            path.unlink(missing_ok=True)
+        try:
+            temp_root.rmdir()
+        except OSError:
+            pass
+        raise
+    _adapter, cookie = open_adapter(session, account, request)
+    try:
+        task = start_upload(
+            session,
+            request.app.state.session_factory,
+            pan_client(request),
+            cookie,
+            user.id,
+            account.id,
+            dest_path,
+            items,
+        )
+    except ValueError as exc:
+        for _rel, path, _size in items:
+            path.unlink(missing_ok=True)
+        try:
+            temp_root.rmdir()
+        except OSError:
+            pass
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return to_upload(task)
+
+
+@router.get("/api/uploads", response_model=list[UploadTaskOut])
+def list_uploads(user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+    return [to_upload(row) for row in list_user_uploads(session, user.id)]
+
+
+@router.post("/api/uploads/{task_id}/cancel", response_model=UploadTaskOut)
+def cancel_upload_route(task_id: int, user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+    task = get_upload(session, task_id)
+    if task is None or task.user_id != user.id:
+        raise HTTPException(status_code=404, detail="上传任务不存在")
+    return to_upload(cancel_upload(session, task))
 
 
 @router.post("/api/transfers", response_model=JobOut, status_code=201)
