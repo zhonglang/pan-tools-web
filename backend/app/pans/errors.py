@@ -33,3 +33,7 @@ class TransferFailed(Exception):
 
 class NotAFile(Exception):
     pass
+
+
+class UploadCancelled(Exception):
+    pass

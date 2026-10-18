@@ -312,6 +312,43 @@ class BaiduAdapter:
         if errno != 0:
             raise TransferFailed()
 
+    def ensure_dir(self, cookie: str, path: str) -> None:
+        cleaned = path.strip().rstrip("/") or "/"
+        if cleaned == "/":
+            return
+        parts = [part for part in cleaned.split("/") if part]
+        current = ""
+        for part in parts:
+            current = f"{current}/{part}"
+            try:
+                self.create_dir(cookie, current)
+            except DuplicateName:
+                pass
+
+    def ensure_subdir(self, cookie: str, dest: str, relative_dir: str) -> str:
+        relative = relative_dir.replace("\\", "/").strip("/")
+        base = dest.strip().rstrip("/") or ""
+        if not relative:
+            return base or "/"
+        full = f"{base}/{relative}" if base else f"/{relative}"
+        if not full.startswith("/"):
+            full = f"/{full}"
+        self.ensure_dir(cookie, full)
+        return full
+
+    def upload_file(
+        self,
+        cookie: str,
+        dest_dir: str,
+        filename: str,
+        stream,
+        size: int,
+        *,
+        on_progress=None,
+        should_stop=None,
+    ) -> None:
+        raise TransferFailed("上传尚未实现")
+
     def rename(self, cookie: str, path: str, new_name: str) -> None:
         self._manage(cookie, "rename", [{"path": path, "newname": new_name}])
 

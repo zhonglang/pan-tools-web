@@ -144,6 +144,37 @@ class QuarkAdapter:
             raise TransferFailed()
         return DirEntry(name=name, path=f"/{fid}", is_dir=True)
 
+    def ensure_dir(self, cookie: str, path: str) -> None:
+        return None
+
+    def ensure_subdir(self, cookie: str, dest: str, relative_dir: str) -> str:
+        relative = relative_dir.replace("\\", "/").strip("/")
+        current = dest.strip() or "/"
+        if not relative:
+            return current
+        for name in relative.split("/"):
+            if not name:
+                continue
+            match = next((entry for entry in self.list_dir(cookie, current) if entry.is_dir and entry.name == name), None)
+            if match is not None:
+                current = match.path
+            else:
+                current = self.create_dir(cookie, current, name).path
+        return current
+
+    def upload_file(
+        self,
+        cookie: str,
+        dest_dir: str,
+        filename: str,
+        stream,
+        size: int,
+        *,
+        on_progress=None,
+        should_stop=None,
+    ) -> None:
+        raise TransferFailed("上传尚未实现")
+
     def rename(self, cookie: str, path: str, new_name: str) -> None:
         self._post("/file/rename", cookie, {"fid": _fid(path), "file_name": new_name})
 
