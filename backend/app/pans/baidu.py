@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
@@ -14,6 +15,7 @@ from app.pans.errors import (
     PathNotFound,
     RateLimited,
     TransferFailed,
+    UploadCancelled,
     WrongPassword,
 )
 
@@ -347,7 +349,117 @@ class BaiduAdapter:
         on_progress=None,
         should_stop=None,
     ) -> None:
-        raise TransferFailed("上传尚未实现")
+        if should_stop and should_stop():
+            raise UploadCancelled()
+        path = _join_path(dest_dir, filename)
+        blocks: list[bytes] = []
+        digests: list[str] = []
+        content_md5 = hashlib.md5()
+        slice_md5 = hashlib.md5()
+        remaining_slice = 256 * 1024
+        while True:
+            if should_stop and should_stop():
+                raise UploadCancelled()
+            chunk = stream.read(UPLOAD_CHUNK)
+            if not chunk:
+                break
+            blocks.append(chunk)
+            digests.append(hashlib.md5(chunk).hexdigest())
+            content_md5.update(chunk)
+            if remaining_slice > 0:
+                take = chunk[:remaining_slice]
+                slice_md5.update(take)
+                remaining_slice -= len(take)
+        if size and sum(len(block) for block in blocks) != size:
+            raise TransferFailed("文件大小不一致")
+        actual_size = sum(len(block) for block in blocks)
+        cookie, bdstoken = self._token_for(cookie)
+        block_list = json.dumps(digests, separators=(",", ":"))
+        precreate = self._post(
+            PRECREATE_URL,
+            {
+                "channel": "chunlei",
+                "web": 1,
+                "app_id": 250528,
+                "clienttype": 0,
+                "bdstoken": bdstoken,
+            },
+            {
+                "path": path,
+                "size": str(actual_size),
+                "isdir": "0",
+                "autoinit": "1",
+                "rtype": "1",
+                "block_list": block_list,
+                "content-md5": content_md5.hexdigest(),
+                "slice-md5": slice_md5.hexdigest(),
+            },
+            cookie,
+        )
+        errno = precreate.get("errno")
+        _raise_common(errno)
+        if errno != 0:
+            raise TransferFailed()
+        if precreate.get("return_type") == 2:
+            if on_progress:
+                on_progress(actual_size)
+            return
+        upload_id = precreate.get("uploadid")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise TransferFailed()
+        needed = precreate.get("block_list")
+        if not isinstance(needed, list) or not needed:
+            needed = list(range(len(blocks)))
+        for partseq in needed:
+            if should_stop and should_stop():
+                raise UploadCancelled()
+            index = int(partseq)
+            if index < 0 or index >= len(blocks):
+                raise TransferFailed()
+            chunk = blocks[index]
+            try:
+                response = self.client.post(
+                    UPLOAD_SLICE_URL,
+                    params={
+                        "method": "upload",
+                        "type": "tmpfile",
+                        "app_id": 250528,
+                        "channel": "chunlei",
+                        "clienttype": 0,
+                        "web": 1,
+                        "path": path,
+                        "uploadid": upload_id,
+                        "uploadsign": 0,
+                        "partseq": index,
+                    },
+                    headers={"Cookie": cookie, "User-Agent": USER_AGENT},
+                    files={"file": (filename, chunk, "application/octet-stream")},
+                    timeout=120,
+                )
+            except Exception as exc:
+                raise TransferFailed() from exc
+            payload = _payload(response)
+            if payload.get("error_code") not in (None, 0) and payload.get("errno") not in (None, 0):
+                raise TransferFailed()
+            if on_progress:
+                on_progress(len(chunk))
+        created = self._post(
+            CREATE_URL,
+            {"a": "commit", "bdstoken": bdstoken, "clienttype": 0, "app_id": 250528, "web": 1},
+            {
+                "path": path,
+                "size": str(actual_size),
+                "isdir": "0",
+                "rtype": "1",
+                "uploadid": upload_id,
+                "block_list": block_list,
+            },
+            cookie,
+        )
+        errno = created.get("errno")
+        _raise_common(errno)
+        if errno != 0:
+            raise TransferFailed()
 
     def rename(self, cookie: str, path: str, new_name: str) -> None:
         self._manage(cookie, "rename", [{"path": path, "newname": new_name}])
@@ -540,15 +652,28 @@ PCS_DOWNLOAD_URL = "https://pcs.baidu.com/rest/2.0/pcs/file"
 PCS_UA = "netdisk;P2SP;2.2.60.26"
 DOWNLOAD_CHUNK = 4 * 1024 * 1024
 CREATE_URL = "https://pan.baidu.com/api/create"
+PRECREATE_URL = "https://pan.baidu.com/api/precreate"
+UPLOAD_SLICE_URL = "https://c3.pcs.baidu.com/rest/2.0/pcs/superfile2"
 TOKEN_URL = "https://pan.baidu.com/api/gettemplatevariable"
 VERIFY_URL = "https://pan.baidu.com/share/verify"
 SHARE_LIST_URL = "https://pan.baidu.com/share/list"
 TRANSFER_URL = "https://pan.baidu.com/share/transfer"
+UPLOAD_CHUNK = 4 * 1024 * 1024
 RATE_LIMIT = {31034, 9019}
 BAD_PASSWORD = {-9, -12}
 BAD_LINK = {2, 105, 110, 111, 115, 116}
 MISSING_DIR = {-9, -7}
 DUPLICATE = {-33, 12}
+
+
+def _join_path(dest_dir: str, filename: str) -> str:
+    base = dest_dir.strip().rstrip("/") or ""
+    name = filename.lstrip("/")
+    if not base:
+        return f"/{name}"
+    if base.startswith("/"):
+        return f"{base}/{name}"
+    return f"/{base}/{name}"
 
 
 class DownloadStream:
