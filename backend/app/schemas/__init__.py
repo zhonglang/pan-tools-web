@@ -17,6 +17,7 @@ from app.schemas.transfer import (
     ShareOut,
     TransferIn,
 )
+from app.schemas.upload import UploadTaskOut
 
 __all__ = [
     "AccountBindIn",
@@ -50,5 +51,6 @@ __all__ = [
     "ShareTargetIn",
     "StatsOut",
     "TransferIn",
+    "UploadTaskOut",
     "UserOut",
 ]
