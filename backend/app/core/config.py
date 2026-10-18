@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     admin_password: str
     auto_create_tables: bool = False
     cookie_fernet_key: str
+    upload_max_bytes: int = 4 * 1024**3
 
 
 @lru_cache
