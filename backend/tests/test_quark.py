@@ -60,6 +60,20 @@ def test_create_rename_delete_use_fid():
     assert b"file-1" in seen[2][2]
 
 
+def test_quark_delete_many_sends_all_fids_once():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/file/delete"):
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"status": 200, "data": {}})
+        raise AssertionError(request.url.path)
+
+    adapter_for("quark", client_for(handler)).delete_many(COOKIE, ["/fid-a", "/fid-b", "/fid-c"])
+    assert seen["body"]["filelist"] == ["fid-a", "fid-b", "fid-c"]
+    assert seen["body"]["action_type"] == 2
+
+
 def test_transfer_share_saves_top_level_files():
     calls = {"task": 0}
     saved = {}
@@ -95,18 +109,77 @@ def test_transfer_share_saves_top_level_files():
 
 
 def test_open_download_streams_the_quark_file():
+    from app.pans.quark import USER_AGENT
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/file/download"):
             assert request.headers["cookie"] == COOKIE
+            assert request.headers["user-agent"] == USER_AGENT
+            assert request.headers["referer"].startswith("https://pan.quark.cn")
             body = json.loads(request.read())
             assert body["fids"] == ["file-1"]
             return httpx.Response(200, json={"status": 200, "data": [{"download_url": "https://dl.example/a.bin"}]})
         assert request.url.host == "dl.example"
+        assert request.headers["cookie"] == COOKIE
+        assert request.headers["user-agent"] == USER_AGENT
+        assert request.headers["referer"].startswith("https://pan.quark.cn")
+        assert "range" not in request.headers
         return httpx.Response(200, content=b"hello", headers={"Content-Length": "5"})
 
     stream = adapter_for("quark", client_for(handler)).open_download(COOKIE, "/file-1")
     assert b"".join(stream) == b"hello"
     assert stream.size == 5
+
+
+def test_open_download_retries_with_electron_ua_on_code_23018():
+    from app.pans.quark import DOWNLOAD_UA, USER_AGENT
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/file/download"):
+            seen.append(request.headers["user-agent"])
+            if len(seen) == 1:
+                assert request.headers["user-agent"] == USER_AGENT
+                return httpx.Response(200, json={"status": 400, "code": 23018, "message": "ua"})
+            assert request.headers["user-agent"] == DOWNLOAD_UA
+            return httpx.Response(200, json={"status": 200, "data": [{"download_url": "https://dl.example/b.bin"}]})
+        assert request.headers["user-agent"] == DOWNLOAD_UA
+        return httpx.Response(200, content=b"ok", headers={"Content-Length": "2"})
+
+    stream = adapter_for("quark", client_for(handler)).open_download(COOKIE, "/file-2")
+    assert b"".join(stream) == b"ok"
+    assert seen == [USER_AGENT, DOWNLOAD_UA]
+
+
+def test_open_download_rejects_cdn_errors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/file/download"):
+            return httpx.Response(200, json={"status": 200, "data": [{"download_url": "https://dl.example/c.bin"}]})
+        return httpx.Response(403, content=b"forbidden")
+
+    from app.pans.errors import TransferFailed
+
+    with pytest.raises(TransferFailed, match="直链下载失败"):
+        adapter_for("quark", client_for(handler)).open_download(COOKIE, "/file-3")
+
+
+def test_open_download_retries_cdn_without_cookie():
+    hits = {"with_cookie": 0, "without": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/file/download"):
+            return httpx.Response(200, json={"status": 200, "data": [{"download_url": "https://dl.example/d.bin"}]})
+        if "cookie" in request.headers:
+            hits["with_cookie"] += 1
+            return httpx.Response(403, content=b"forbidden")
+        hits["without"] += 1
+        return httpx.Response(200, content=b"data", headers={"Content-Length": "4"})
+
+    stream = adapter_for("quark", client_for(handler)).open_download(COOKIE, "/file-4")
+    assert b"".join(stream) == b"data"
+    assert hits["with_cookie"] == 1
+    assert hits["without"] == 1
 
 
 def test_list_share_records_keeps_missing_counts_empty():
@@ -415,7 +488,7 @@ def test_daily_sync_skips_quark_account(client):
         session.add(account)
         session.commit()
         account_id = account.id
-        enqueue_daily_syncs(session, datetime(2026, 9, 22, 16, 5, tzinfo=timezone.utc))
+        enqueue_daily_syncs(session, datetime(2026, 9, 22, 16, 1, tzinfo=timezone.utc))
         session.commit()
         jobs = session.scalars(select(Job).where(Job.account_id == account_id, Job.type == "sync")).all()
         assert jobs == []

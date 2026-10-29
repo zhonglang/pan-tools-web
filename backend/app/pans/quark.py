@@ -10,7 +10,7 @@ from email.utils import format_datetime
 
 import httpx
 
-from app.pans.baidu import DirEntry, DownloadStream
+from app.pans.baidu import DirEntry, stream_full_download
 from app.pans.errors import (
     DuplicateName,
     InvalidLink,
@@ -28,14 +28,37 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
+DOWNLOAD_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 "
+    "Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch"
+)
+REFERER = "https://pan.quark.cn/"
 
 
 class QuarkAdapter:
     def __init__(self, client: httpx.Client) -> None:
         self.client = client
+        self.warmed: str | None = None
 
-    def _headers(self, cookie: str) -> dict[str, str]:
-        return {"Cookie": cookie, "User-Agent": USER_AGENT}
+    def _headers(self, cookie: str, *, ua: str | None = None) -> dict[str, str]:
+        return {
+            "Cookie": cookie,
+            "User-Agent": ua or USER_AGENT,
+            "Accept": "application/json, text/plain, */*",
+            "Referer": REFERER,
+            "Origin": "https://pan.quark.cn",
+        }
+
+    def _cookie(self, cookie: str) -> str:
+        return self.warmed if isinstance(self.warmed, str) and self.warmed else cookie
+
+    def _remember_cookies(self, cookie: str, response: httpx.Response) -> str:
+        current = self._cookie(cookie)
+        updated = _merge_set_cookies(current, response)
+        if updated != current:
+            self.warmed = updated
+        return updated
 
     def verify_login(self, cookie: str) -> str:
         try:
@@ -85,29 +108,38 @@ class QuarkAdapter:
             raise InvalidLink()
         raise TransferFailed()
 
-    def _get(self, path: str, cookie: str, params: dict, *, invalid: bool = False) -> dict:
+    def _get(
+        self, path: str, cookie: str, params: dict, *, invalid: bool = False
+    ) -> dict:
         try:
             response = self.client.get(
                 f"{BASE}{path}",
                 params=self._params(params),
-                headers=self._headers(cookie),
+                headers=self._headers(self._cookie(cookie)),
                 timeout=20,
             )
         except Exception as exc:
             raise TransferFailed() from exc
+        self._remember_cookies(cookie, response)
         return self._payload(response, invalid=invalid)
 
-    def _post(self, path: str, cookie: str, body: dict, *, invalid: bool = False) -> dict:
+    def _post(
+        self, path: str, cookie: str, body: dict, *, invalid: bool = False
+    ) -> dict:
         try:
             response = self.client.post(
                 f"{BASE}{path}",
                 params=PARAMS,
-                headers={**self._headers(cookie), "Content-Type": "application/json"},
+                headers={
+                    **self._headers(self._cookie(cookie)),
+                    "Content-Type": "application/json",
+                },
                 json=body,
                 timeout=20,
             )
         except Exception as exc:
             raise TransferFailed() from exc
+        self._remember_cookies(cookie, response)
         return self._payload(response, invalid=invalid)
 
     def list_dir(self, cookie: str, directory: str) -> list[DirEntry]:
@@ -170,7 +202,14 @@ class QuarkAdapter:
         for name in relative.split("/"):
             if not name:
                 continue
-            match = next((entry for entry in self.list_dir(cookie, current) if entry.is_dir and entry.name == name), None)
+            match = next(
+                (
+                    entry
+                    for entry in self.list_dir(cookie, current)
+                    if entry.is_dir and entry.name == name
+                ),
+                None,
+            )
             if match is not None:
                 current = match.path
             else:
@@ -217,7 +256,11 @@ class QuarkAdapter:
         task_id = pre_data.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             raise TransferFailed()
-        hashed = self._post("/file/update/hash", cookie, {"md5": md5_hex, "sha1": sha1_hex, "task_id": task_id})
+        hashed = self._post(
+            "/file/update/hash",
+            cookie,
+            {"md5": md5_hex, "sha1": sha1_hex, "task_id": task_id},
+        )
         hash_data = hashed.get("data") if isinstance(hashed.get("data"), dict) else {}
         if hash_data.get("finish") is True:
             if on_progress:
@@ -241,9 +284,15 @@ class QuarkAdapter:
                 on_progress(len(chunk))
             part_number += 1
         self._upload_commit(cookie, pre_data, etags)
-        self._post("/file/upload/finish", cookie, {"obj_key": pre_data.get("obj_key"), "task_id": task_id})
+        self._post(
+            "/file/upload/finish",
+            cookie,
+            {"obj_key": pre_data.get("obj_key"), "task_id": task_id},
+        )
 
-    def _upload_auth(self, cookie: str, auth_info: object, auth_meta: str, task_id: str) -> str:
+    def _upload_auth(
+        self, cookie: str, auth_info: object, auth_meta: str, task_id: str
+    ) -> str:
         payload = self._post(
             "/file/upload/auth",
             cookie,
@@ -259,12 +308,24 @@ class QuarkAdapter:
         bucket = pre_data.get("bucket")
         upload_url = pre_data.get("upload_url")
         obj_key = pre_data.get("obj_key")
-        if not isinstance(bucket, str) or not isinstance(upload_url, str) or not isinstance(obj_key, str):
+        if (
+            not isinstance(bucket, str)
+            or not isinstance(upload_url, str)
+            or not isinstance(obj_key, str)
+        ):
             raise TransferFailed()
-        host = upload_url[7:] if upload_url.startswith("http://") else upload_url[8:] if upload_url.startswith("https://") else upload_url
+        host = (
+            upload_url[7:]
+            if upload_url.startswith("http://")
+            else upload_url[8:]
+            if upload_url.startswith("https://")
+            else upload_url
+        )
         return f"https://{bucket}.{host}/{obj_key}"
 
-    def _upload_part(self, cookie: str, pre_data: dict, mime: str, part_number: int, chunk: bytes) -> str:
+    def _upload_part(
+        self, cookie: str, pre_data: dict, mime: str, part_number: int, chunk: bytes
+    ) -> str:
         now = format_datetime(datetime.now(timezone.utc), usegmt=True)
         upload_id = pre_data.get("upload_id")
         bucket = pre_data.get("bucket")
@@ -275,7 +336,9 @@ class QuarkAdapter:
             f"x-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n"
             f"/{bucket}/{obj_key}?partNumber={part_number}&uploadId={upload_id}"
         )
-        auth_key = self._upload_auth(cookie, pre_data.get("auth_info"), auth_meta, str(task_id))
+        auth_key = self._upload_auth(
+            cookie, pre_data.get("auth_info"), auth_meta, str(task_id)
+        )
         try:
             response = self.client.put(
                 self._oss_url(pre_data),
@@ -310,7 +373,9 @@ class QuarkAdapter:
             f"<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>"
         )
         content_md5 = base64.b64encode(hashlib.md5(xml_body.encode()).digest()).decode()
-        callback_b64 = base64.b64encode(json.dumps(pre_data.get("callback")).encode()).decode()
+        callback_b64 = base64.b64encode(
+            json.dumps(pre_data.get("callback")).encode()
+        ).decode()
         upload_id = pre_data.get("upload_id")
         bucket = pre_data.get("bucket")
         obj_key = pre_data.get("obj_key")
@@ -321,7 +386,9 @@ class QuarkAdapter:
             f"x-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit\n"
             f"/{bucket}/{obj_key}?uploadId={upload_id}"
         )
-        auth_key = self._upload_auth(cookie, pre_data.get("auth_info"), auth_meta, str(task_id))
+        auth_key = self._upload_auth(
+            cookie, pre_data.get("auth_info"), auth_meta, str(task_id)
+        )
         try:
             response = self.client.post(
                 self._oss_url(pre_data),
@@ -347,7 +414,17 @@ class QuarkAdapter:
         self._post("/file/rename", cookie, {"fid": _fid(path), "file_name": new_name})
 
     def delete(self, cookie: str, path: str) -> None:
-        self._post("/file/delete", cookie, {"action_type": 2, "filelist": [_fid(path)], "exclude_fids": []})
+        self.delete_many(cookie, [path])
+
+    def delete_many(self, cookie: str, paths: list[str]) -> None:
+        targets = [_fid(path) for path in paths if path]
+        if not targets:
+            return
+        self._post(
+            "/file/delete",
+            cookie,
+            {"action_type": 2, "filelist": targets, "exclude_fids": []},
+        )
 
     def copy(self, cookie: str, path: str, dest: str, new_name: str) -> None:
         existing = self.list_dir(cookie, dest)
@@ -395,7 +472,13 @@ class QuarkAdapter:
         detail = self._get(
             "/share/sharepage/detail",
             cookie,
-            {"pwd_id": pwd_id, "stoken": stoken, "pdir_fid": "0", "_page": 1, "_size": 50},
+            {
+                "pwd_id": pwd_id,
+                "stoken": stoken,
+                "pdir_fid": "0",
+                "_page": 1,
+                "_size": 50,
+            },
             invalid=True,
         )
         listed = detail.get("data") if isinstance(detail.get("data"), dict) else {}
@@ -408,7 +491,12 @@ class QuarkAdapter:
                     continue
                 fid = item.get("fid")
                 share_token = item.get("share_fid_token")
-                if isinstance(fid, str) and fid and isinstance(share_token, str) and share_token:
+                if (
+                    isinstance(fid, str)
+                    and fid
+                    and isinstance(share_token, str)
+                    and share_token
+                ):
                     fids.append(fid)
                     tokens.append(share_token)
         if not fids:
@@ -433,31 +521,74 @@ class QuarkAdapter:
         self._wait_task(cookie, task_id, wait)
 
     def open_download(self, cookie: str, path: str):
-        payload = self._post("/file/download", cookie, {"fids": [_fid(path)]})
+        # Download URL is signed against the Cookie + User-Agent used for /file/download.
+        req_cookie = self._cookie(cookie)
+        ua = USER_AGENT
+        payload: dict | None = None
+        for _ in range(2):
+            try:
+                response = self.client.post(
+                    f"{BASE}/file/download",
+                    params={**PARAMS, "sys": "win32", "ve": "2.5.56"},
+                    headers={
+                        **self._headers(req_cookie, ua=ua),
+                        "Content-Type": "application/json",
+                    },
+                    json={"fids": [_fid(path)]},
+                    timeout=20,
+                )
+            except Exception as exc:
+                raise TransferFailed("获取下载地址失败") from exc
+            try:
+                body = response.json()
+            except Exception as exc:
+                raise TransferFailed("获取下载地址失败") from exc
+            if not isinstance(body, dict):
+                raise TransferFailed("获取下载地址失败")
+            if body.get("code") == 23018 and ua != DOWNLOAD_UA:
+                ua = DOWNLOAD_UA
+                continue
+            try:
+                payload = self._payload(response)
+            except TransferFailed as exc:
+                message = body.get("message")
+                text = (
+                    message
+                    if isinstance(message, str) and message.strip()
+                    else "获取下载地址失败"
+                )
+                raise TransferFailed(text) from exc
+            break
+        if payload is None:
+            raise TransferFailed("获取下载地址失败")
+        # Keep the request Cookie snapshot; do not merge Set-Cookie before CDN fetch.
         data = payload.get("data")
-        first = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+        first = (
+            data[0]
+            if isinstance(data, list) and data and isinstance(data[0], dict)
+            else {}
+        )
         url = first.get("download_url")
         if not isinstance(url, str) or not url:
-            raise TransferFailed()
+            raise TransferFailed("未返回下载地址")
+        headers = {"User-Agent": ua, "Referer": REFERER}
         try:
-            response = self.client.get(url, headers=self._headers(cookie), timeout=30)
-        except Exception as exc:
-            raise TransferFailed() from exc
-        if response.status_code != 200:
-            raise TransferFailed()
-        length = response.headers.get("content-length")
-        size = int(length) if isinstance(length, str) and length.isdecimal() else len(response.content)
-        body = response.content
-
-        def chunks():
-            yield body
-
-        return DownloadStream(chunks(), size)
+            return stream_full_download(
+                self.client, url, {**headers, "Cookie": req_cookie}
+            )
+        except TransferFailed:
+            # Some OSS nodes reject an extra Cookie on already-signed URLs.
+            try:
+                return stream_full_download(self.client, url, headers)
+            except TransferFailed as exc:
+                raise TransferFailed("直链下载失败") from exc
 
     def list_share_records(self, cookie: str) -> list[dict]:
         records: list[dict] = []
         for page in range(1, 101):
-            payload = self._get("/share/mypage/detail", cookie, {"_page": page, "_size": 50})
+            payload = self._get(
+                "/share/mypage/detail", cookie, {"_page": page, "_size": 50}
+            )
             data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
             batch = data.get("list") or []
             if not isinstance(batch, list):
@@ -514,14 +645,20 @@ class QuarkAdapter:
             raise TransferFailed()
         return url, saved if code else ""
 
-    def _wait_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> dict:
+    def _wait_task(
+        self, cookie: str, task_id: str, sleeper: Callable[[float], None]
+    ) -> dict:
         for index in range(30):
-            payload = self._get("/task", cookie, {"task_id": task_id, "retry_index": index})
+            payload = self._get(
+                "/task", cookie, {"task_id": task_id, "retry_index": index}
+            )
             data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
             state = data.get("status")
             if state == 2:
                 return data
-            message = data.get("message") if isinstance(data.get("message"), str) else ""
+            message = (
+                data.get("message") if isinstance(data.get("message"), str) else ""
+            )
             if state not in {0, 1, None} or "同名" in message:
                 if "同名" in message:
                     raise DuplicateName()
@@ -545,7 +682,11 @@ def _share_record(item: dict) -> dict:
     url = item.get("share_url") if isinstance(item.get("share_url"), str) else ""
     if not url and pwd_id:
         url = f"https://pan.quark.cn/s/{pwd_id}"
-    title = item.get("title") if isinstance(item.get("title"), str) else item.get("file_name")
+    title = (
+        item.get("title")
+        if isinstance(item.get("title"), str)
+        else item.get("file_name")
+    )
     expired_at = item.get("expired_at")
     created_at = item.get("created_at")
     record = {
@@ -559,7 +700,9 @@ def _share_record(item: dict) -> dict:
     if isinstance(created_at, int):
         record["ctime"] = created_at // 1000 if created_at >= 10**12 else created_at
     if isinstance(expired_at, int) and expired_at > 0:
-        record["expiredTime"] = expired_at // 1000 if expired_at >= 10**12 else expired_at
+        record["expiredTime"] = (
+            expired_at // 1000 if expired_at >= 10**12 else expired_at
+        )
     return record
 
 
@@ -579,3 +722,31 @@ def _fid(directory: str) -> str:
     if cleaned in {"", "/"}:
         return "0"
     return cleaned.rsplit("/", 1)[-1]
+
+
+def _merge_set_cookies(cookie: str, response: httpx.Response) -> str:
+    jar = dict(_cookie_pairs(cookie))
+    for header in response.headers.get_list("set-cookie"):
+        part = header.split(";", 1)[0]
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if name:
+            jar[name] = value.strip()
+    if not jar:
+        return cookie
+    return "; ".join(f"{name}={value}" for name, value in jar.items())
+
+
+def _cookie_pairs(cookie: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for part in cookie.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if name:
+            pairs.append((name, value.strip()))
+    return pairs

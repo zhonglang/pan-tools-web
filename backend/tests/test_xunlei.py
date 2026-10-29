@@ -184,6 +184,47 @@ def test_xunlei_share_list_keeps_missing_counts_empty():
     assert records[0]["downloads"] is None
 
 
+def test_open_download_streams_the_xunlei_file():
+    from app.pans.baidu import DOWNLOAD_CHUNK
+    from app.pans.xunlei import DOWNLOAD_UA
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/files/file-1") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"id": "file-1", "kind": "drive#file", "web_content_link": "https://dl.example/x.bin", "size": "5"},
+            )
+        assert request.url.host == "dl.example"
+        assert request.headers["user-agent"] == DOWNLOAD_UA
+        assert "authorization" not in request.headers
+        assert request.headers["range"] == f"bytes=0-{DOWNLOAD_CHUNK - 1}"
+        return httpx.Response(206, content=b"hello", headers={"Content-Range": "bytes 0-4/5"})
+
+    stream = adapter_for("xunlei", client_for(handler)).open_download(_cookie(), "/file-1")
+    assert b"".join(stream) == b"hello"
+    assert stream.size == 5
+
+
+def test_open_download_falls_back_to_xunlei_media_link():
+    from app.pans.xunlei import DOWNLOAD_UA
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/files/file-2"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "file-2",
+                    "kind": "drive#file",
+                    "medias": [{"category": "category_origin", "link": {"url": "https://dl.example/m.bin"}}],
+                },
+            )
+        assert request.headers["user-agent"] == DOWNLOAD_UA
+        return httpx.Response(200, content=b"media")
+
+    stream = adapter_for("xunlei", client_for(handler)).open_download(_cookie(), "/file-2")
+    assert b"".join(stream) == b"media"
+
+
 def test_xunlei_copy_posts_to_parent():
     calls = {"list": 0, "task": 0}
     sleeps: list[float] = []
@@ -231,6 +272,25 @@ def test_xunlei_copy_posts_to_parent():
     )
     assert calls["task"] >= 2
     assert sleeps
+
+
+def test_xunlei_delete_many_uses_batch_trash():
+    seen = {}
+    calls = {"task": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/files:batchTrash"):
+            seen["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"task_id": "task-del"})
+        if path.endswith("/tasks/task-del"):
+            calls["task"] += 1
+            return httpx.Response(200, json={"phase": "PHASE_TYPE_COMPLETE"})
+        raise AssertionError(f"{request.method} {path}")
+
+    adapter_for("xunlei", client_for(handler)).delete_many(COOKIE, ["/fid-a", "/fid-b"], sleeper=lambda _s: None)
+    assert seen["body"] == {"ids": ["fid-a", "fid-b"]}
+    assert calls["task"] >= 1
 
 
 def test_xunlei_copy_raises_when_name_exists():

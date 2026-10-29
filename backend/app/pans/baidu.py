@@ -53,7 +53,9 @@ class BaiduAdapter:
     def _headers(self, cookie: str) -> dict[str, str]:
         return {"Cookie": cookie, "User-Agent": USER_AGENT}
 
-    def _get(self, url: str, params: dict, cookie: str, referer: str | None = None) -> dict:
+    def _get(
+        self, url: str, params: dict, cookie: str, referer: str | None = None
+    ) -> dict:
         headers = self._headers(cookie)
         if referer:
             headers["Referer"] = referer
@@ -65,8 +67,18 @@ class BaiduAdapter:
             raise TransferFailed() from exc
         return _payload(response)
 
-    def _post(self, url: str, params: dict, data: dict, cookie: str, referer: str | None = None) -> dict:
-        headers = {**self._headers(cookie), "Content-Type": "application/x-www-form-urlencoded"}
+    def _post(
+        self,
+        url: str,
+        params: dict,
+        data: dict,
+        cookie: str,
+        referer: str | None = None,
+    ) -> dict:
+        headers = {
+            **self._headers(cookie),
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
         if referer:
             headers["Referer"] = referer
         try:
@@ -206,7 +218,9 @@ class BaiduAdapter:
             url = loc
         return _cookie_header(jar)
 
-    def transfer_share(self, cookie: str, surl: str, password: str | None, directory: str) -> None:
+    def transfer_share(
+        self, cookie: str, surl: str, password: str | None, directory: str
+    ) -> None:
         cookie, bdstoken = self._token_for(cookie)
         referer = f"https://pan.baidu.com/share/init?surl={surl}"
         verified = self._post(
@@ -301,7 +315,13 @@ class BaiduAdapter:
         cookie, bdstoken = self._token_for(cookie)
         created = self._post(
             CREATE_URL,
-            {"a": "commit", "bdstoken": bdstoken, "clienttype": 0, "app_id": 250528, "web": 1},
+            {
+                "a": "commit",
+                "bdstoken": bdstoken,
+                "clienttype": 0,
+                "app_id": 250528,
+                "web": 1,
+            },
             {"path": path, "isdir": "1", "block_list": "[]"},
             cookie,
         )
@@ -439,13 +459,21 @@ class BaiduAdapter:
             except Exception as exc:
                 raise TransferFailed() from exc
             payload = _payload(response)
-            if payload.get("error_code") not in (None, 0) and payload.get("errno") not in (None, 0):
+            if payload.get("error_code") not in (None, 0) and payload.get(
+                "errno"
+            ) not in (None, 0):
                 raise TransferFailed()
             if on_progress:
                 on_progress(len(chunk))
         created = self._post(
             CREATE_URL,
-            {"a": "commit", "bdstoken": bdstoken, "clienttype": 0, "app_id": 250528, "web": 1},
+            {
+                "a": "commit",
+                "bdstoken": bdstoken,
+                "clienttype": 0,
+                "app_id": 250528,
+                "web": 1,
+            },
             {
                 "path": path,
                 "size": str(actual_size),
@@ -465,16 +493,38 @@ class BaiduAdapter:
         self._manage(cookie, "rename", [{"path": path, "newname": new_name}])
 
     def delete(self, cookie: str, path: str) -> None:
-        self._manage(cookie, "delete", [path])
+        self.delete_many(cookie, [path])
+
+    def delete_many(self, cookie: str, paths: list[str]) -> None:
+        targets = [path for path in paths if path]
+        if not targets:
+            return
+        self._manage(cookie, "delete", targets)
 
     def copy(self, cookie: str, path: str, dest: str, new_name: str) -> None:
-        self._manage(cookie, "copy", [{"path": path, "dest": dest, "newname": new_name}])
+        self._manage(
+            cookie, "copy", [{"path": path, "dest": dest, "newname": new_name}]
+        )
 
-    def create_share(self, cookie: str, fs_id: int, password: str, period: str = "0", path: str | None = None, name: str | None = None) -> str:
+    def create_share(
+        self,
+        cookie: str,
+        fs_id: int,
+        password: str,
+        period: str = "0",
+        path: str | None = None,
+        name: str | None = None,
+    ) -> str:
         cookie, bdstoken = self._token_for(cookie)
         created = self._post(
             SHARE_SET_URL,
-            {"channel": "chunlei", "clienttype": 0, "web": 1, "app_id": 250528, "bdstoken": bdstoken},
+            {
+                "channel": "chunlei",
+                "clienttype": 0,
+                "web": 1,
+                "app_id": 250528,
+                "bdstoken": bdstoken,
+            },
             {
                 "schannel": "4",
                 "channel_list": "[]",
@@ -541,22 +591,32 @@ class BaiduAdapter:
 
             def chunks(url=url, first=first, status=response.status_code, total=total):
                 yield first
-                if status == 200 or len(first) < DOWNLOAD_CHUNK or (total is not None and len(first) >= total):
+                if (
+                    status == 200
+                    or len(first) < DOWNLOAD_CHUNK
+                    or (total is not None and len(first) >= total)
+                ):
                     return
                 start = len(first)
                 while True:
-                    nxt = self._range_get(cookie, url, start, start + DOWNLOAD_CHUNK - 1)
+                    nxt = self._range_get(
+                        cookie, url, start, start + DOWNLOAD_CHUNK - 1
+                    )
                     if nxt is None:
                         raise TransferFailed()
                     if nxt.status_code == 416 or not nxt.content:
                         return
                     yield nxt.content
                     start += len(nxt.content)
-                    if len(nxt.content) < DOWNLOAD_CHUNK or (total is not None and start >= total):
+                    if len(nxt.content) < DOWNLOAD_CHUNK or (
+                        total is not None and start >= total
+                    ):
                         return
 
             status = response.status_code
-            size = total if total is not None else (len(first) if status == 200 else None)
+            size = (
+                total if total is not None else (len(first) if status == 200 else None)
+            )
             return DownloadStream(chunks(), size)
         raise TransferFailed()
 
@@ -564,7 +624,12 @@ class BaiduAdapter:
         try:
             response = self.client.get(
                 PCS_DOWNLOAD_URL,
-                params={"method": "locatedownload", "app_id": 250528, "path": path, "ver": "2.0"},
+                params={
+                    "method": "locatedownload",
+                    "app_id": 250528,
+                    "path": path,
+                    "ver": "2.0",
+                },
                 headers={"Cookie": cookie, "User-Agent": PCS_UA},
                 timeout=20,
                 follow_redirects=False,
@@ -594,7 +659,9 @@ class BaiduAdapter:
                 continue
             parsed = urlparse(url)
             host = parsed.hostname or ""
-            if parsed.scheme not in {"https", "http"} or not host.endswith(("baidu.com", "baidupcs.com", "baidubce.com")):
+            if parsed.scheme not in {"https", "http"} or not host.endswith(
+                ("baidu.com", "baidupcs.com", "baidubce.com")
+            ):
                 continue
             found.append(url)
         https = [url for url in found if url.startswith("https://")]
@@ -603,11 +670,17 @@ class BaiduAdapter:
             raise TransferFailed()
         return ordered
 
-    def _range_get(self, cookie: str, url: str, start: int, end: int) -> httpx.Response | None:
+    def _range_get(
+        self, cookie: str, url: str, start: int, end: int
+    ) -> httpx.Response | None:
         try:
             response = self.client.get(
                 url,
-                headers={"User-Agent": PCS_UA, "Cookie": cookie, "Range": f"bytes={start}-{end}"},
+                headers={
+                    "User-Agent": PCS_UA,
+                    "Cookie": cookie,
+                    "Range": f"bytes={start}-{end}",
+                },
                 timeout=60,
                 follow_redirects=True,
             )
@@ -683,6 +756,85 @@ class DownloadStream:
 
     def __iter__(self):
         return self._chunks
+
+
+def stream_ranged_download(
+    client: httpx.Client, url: str, headers: dict[str, str]
+) -> DownloadStream:
+    """Fetch a CDN URL in chunks. Validates the first range before returning the stream."""
+
+    def range_get(start: int, end: int) -> httpx.Response | None:
+        try:
+            response = client.get(
+                url,
+                headers={**headers, "Range": f"bytes={start}-{end}"},
+                timeout=60,
+                follow_redirects=True,
+            )
+        except Exception as exc:
+            raise TransferFailed() from exc
+        if response.status_code in {200, 206, 416}:
+            return response
+        return None
+
+    first = range_get(0, DOWNLOAD_CHUNK - 1)
+    if first is None:
+        raise TransferFailed()
+    body = first.content
+    total = _content_range_total(first)
+
+    def chunks():
+        yield body
+        if (
+            first.status_code == 200
+            or len(body) < DOWNLOAD_CHUNK
+            or (total is not None and len(body) >= total)
+        ):
+            return
+        start = len(body)
+        while True:
+            nxt = range_get(start, start + DOWNLOAD_CHUNK - 1)
+            if nxt is None:
+                raise TransferFailed()
+            if nxt.status_code == 416 or not nxt.content:
+                return
+            yield nxt.content
+            start += len(nxt.content)
+            if len(nxt.content) < DOWNLOAD_CHUNK or (
+                total is not None and start >= total
+            ):
+                return
+
+    size = (
+        total
+        if total is not None
+        else (len(body) if first.status_code == 200 else None)
+    )
+    return DownloadStream(chunks(), size)
+
+
+def stream_full_download(
+    client: httpx.Client, url: str, headers: dict[str, str]
+) -> DownloadStream:
+    """Stream a CDN URL without Range. Needed when the host rejects ranged GETs."""
+    try:
+        request = client.build_request("GET", url, headers=headers)
+        response = client.send(request, stream=True, follow_redirects=True)
+    except Exception as exc:
+        raise TransferFailed() from exc
+    if response.status_code not in {200, 206}:
+        response.close()
+        raise TransferFailed()
+    length = response.headers.get("content-length")
+    size = int(length) if isinstance(length, str) and length.isdecimal() else None
+
+    def chunks():
+        try:
+            yield from response.iter_bytes(1024 * 1024)
+        finally:
+            response.close()
+
+    return DownloadStream(chunks(), size)
 
 
 @dataclass(frozen=True)

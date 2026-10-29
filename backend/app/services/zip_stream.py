@@ -3,7 +3,9 @@ import zlib
 from collections.abc import Iterator
 
 
-def stream_stored_zip(files: list[tuple[str, int, Iterator[bytes] | None]]) -> Iterator[bytes]:
+def stream_stored_zip(
+    files: list[tuple[str, int, Iterator[bytes] | None]],
+) -> Iterator[bytes]:
     central: list[tuple[bytes, int, int, int]] = []
     offset = 0
     for name, size, chunks in files:
@@ -21,7 +23,9 @@ def stream_stored_zip(files: list[tuple[str, int, Iterator[bytes] | None]]) -> I
                 yield chunk
         if written != size:
             raise ValueError("压缩包条目大小不一致")
-        descriptor = struct.pack("<IIQQ", 0x08074B50, crc & 0xFFFFFFFF, written, written)
+        descriptor = struct.pack(
+            "<IIQQ", 0x08074B50, crc & 0xFFFFFFFF, written, written
+        )
         yield descriptor
         central.append((name_bytes, crc & 0xFFFFFFFF, written, offset))
         offset += len(local) + written + len(descriptor)
@@ -67,7 +71,9 @@ def stream_stored_zip(files: list[tuple[str, int, Iterator[bytes] | None]]) -> I
         central_start,
     )
     yield struct.pack("<IIQI", 0x07064B50, 0, central_start + len(central_blob), 1)
-    yield struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+    yield struct.pack(
+        "<IHHHHIIH", 0x06054B50, 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+    )
 
 
 def stored_zip_size(files: list[tuple[str, int]]) -> int:
@@ -81,17 +87,20 @@ def stored_zip_size(files: list[tuple[str, int]]) -> int:
 
 
 def _local_header(name_bytes: bytes) -> bytes:
-    return struct.pack(
-        "<IHHHHHIIIHH",
-        0x04034B50,
-        45,
-        0x0808,
-        0,
-        0,
-        0,
-        0,
-        0xFFFFFFFF,
-        0xFFFFFFFF,
-        len(name_bytes),
-        0,
-    ) + name_bytes
+    return (
+        struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            45,
+            0x0808,
+            0,
+            0,
+            0,
+            0,
+            0xFFFFFFFF,
+            0xFFFFFFFF,
+            len(name_bytes),
+            0,
+        )
+        + name_bytes
+    )

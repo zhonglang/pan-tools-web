@@ -61,7 +61,14 @@ class LoginSessionStore:
                 item.cookie = None
             return item
 
-    def mark(self, session_id: str, user_id: int, status: str, cookie: str | None = None, nickname: str | None = None) -> None:
+    def mark(
+        self,
+        session_id: str,
+        user_id: int,
+        status: str,
+        cookie: str | None = None,
+        nickname: str | None = None,
+    ) -> None:
         with self._lock:
             item = self._items.get(session_id)
             if item is None or item.user_id != user_id or item.status == "expired":

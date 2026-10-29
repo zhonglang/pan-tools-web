@@ -95,7 +95,9 @@ def run_item(
     parsed = parse_share_link(item.input_text)
     if parsed is None or parsed.provider != account.provider:
         item.status = "failed"
-        item.error = "链接无法解析" if parsed is None else _provider_error(parsed.provider)
+        item.error = (
+            "链接无法解析" if parsed is None else _provider_error(parsed.provider)
+        )
         item.updated_at = now
         return "failed"
     while item.attempts < 3:
@@ -150,12 +152,16 @@ def run_item(
     return "failed"
 
 
-def execute_job(session: Session, client, job: Job, sleeper: Callable[[float], None], now: datetime) -> None:
+def execute_job(
+    session: Session, client, job: Job, sleeper: Callable[[float], None], now: datetime
+) -> None:
     job.status = "running"
     job.updated_at = now
     publish(session)
     account = session.get(PanAccount, job.account_id)
-    items = session.scalars(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.id)).all()
+    items = session.scalars(
+        select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.id)
+    ).all()
     if account is None or account.status != "valid":
         fail_remaining(items, 0, now)
         finish_job(job, items, now)
@@ -178,7 +184,11 @@ def execute_job(session: Session, client, job: Job, sleeper: Callable[[float], N
 
 def reclaim_stale(session: Session, now: datetime) -> None:
     cutoff = now - timedelta(minutes=15)
-    jobs = session.scalars(select(Job).where(Job.type.in_(("transfer", "share", "sync")), Job.status == "running")).all()
+    jobs = session.scalars(
+        select(Job).where(
+            Job.type.in_(("transfer", "share", "sync")), Job.status == "running"
+        )
+    ).all()
     for job in jobs:
         if job.type == "sync":
             if _aware(job.updated_at) < cutoff:

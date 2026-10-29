@@ -127,9 +127,13 @@ export type LibraryItem = {
   id: number;
   prefix: string;
   name: string;
+  finished: boolean;
+  latest_episode: number | null;
+  previous_episode?: number | null;
   xunlei_url: string;
   quark_url: string;
   baidu_url: string;
+  updated_at?: string | null;
 };
 
 export type LibraryCheckHit = {
@@ -151,6 +155,46 @@ export type LibraryImportResult = {
   updated: number;
   skipped: number;
   items: LibraryItem[];
+};
+
+export type LibrarySyncSource = {
+  id: number;
+  account_id: number;
+  directory: string;
+  label: string;
+  sort_order: number;
+};
+
+export type LinkedRenameMember = {
+  id: number;
+  account_id: number;
+  directory: string;
+  label: string;
+  is_primary: boolean;
+  sort_order: number;
+};
+
+export type LinkedRenameResult = {
+  renamed: number;
+  skipped: number;
+  failed: number;
+  errors: string[];
+};
+
+export type LibraryEpisodeSyncHit = {
+  id: number;
+  prefix: string;
+  name: string;
+  finished: boolean;
+  latest_episode: number | null;
+  changed: boolean;
+};
+
+export type LibraryEpisodeSyncResult = {
+  updated: number;
+  unchanged: number;
+  unmatched: number;
+  items: LibraryEpisodeSyncHit[];
 };
 
 export type JobSummary = {
@@ -233,6 +277,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+  deleteFiles: (accountId: number, paths: string[]) =>
+    request<{ ok: boolean }>(`/api/accounts/${accountId}/files/delete-batch`, {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
   copyFiles: (
     accountId: number,
     body: { path: string; fs_id: number | null; name: string; is_dir: boolean; targets: string[] },
@@ -291,6 +340,23 @@ export const api = {
         }),
       },
     ),
+  librarySyncSources: () => request<LibrarySyncSource[]>("/api/settings/library-sync-sources"),
+  saveLibrarySyncSources: (sources: Omit<LibrarySyncSource, "id">[]) =>
+    request<LibrarySyncSource[]>("/api/settings/library-sync-sources", {
+      method: "PUT",
+      body: JSON.stringify({ sources }),
+    }),
+  linkedRenameConfig: () => request<{ members: LinkedRenameMember[] }>("/api/settings/linked-rename"),
+  saveLinkedRenameConfig: (members: Omit<LinkedRenameMember, "id">[]) =>
+    request<{ members: LinkedRenameMember[] }>("/api/settings/linked-rename", {
+      method: "PUT",
+      body: JSON.stringify({ members }),
+    }),
+  linkedRename: (accountId: number, path: string, currentName: string, name: string) =>
+    request<LinkedRenameResult>("/api/files/linked-rename", {
+      method: "POST",
+      body: JSON.stringify({ account_id: accountId, path, current_name: currentName, name }),
+    }),
   createShare: (
     accountId: number,
     directory: string,
@@ -354,11 +420,15 @@ export const api = {
   },
   library: () => request<LibraryItem[]>("/api/library"),
   checkLibrary: () => request<LibraryCheckResult>("/api/library/check", { method: "POST" }),
-  createLibrary: (body: { prefix: string; name: string; xunlei_url: string; quark_url: string; baidu_url: string }) =>
-    request<LibraryItem>("/api/library", { method: "POST", body: JSON.stringify(body) }),
+  syncLibraryEpisodes: () => request<LibraryEpisodeSyncResult>("/api/library/sync-episodes", { method: "POST" }),
+  createLibrary: (
+    body: Pick<LibraryItem, "prefix" | "name" | "finished" | "latest_episode" | "xunlei_url" | "quark_url" | "baidu_url">,
+  ) => request<LibraryItem>("/api/library", { method: "POST", body: JSON.stringify(body) }),
   importLibrary: (rows: { name: string; url: string; password: string }[]) =>
     request<LibraryImportResult>("/api/library/import", { method: "POST", body: JSON.stringify({ rows }) }),
-  updateLibrary: (id: number, body: Pick<LibraryItem, "name" | "xunlei_url" | "quark_url" | "baidu_url">) =>
-    request<LibraryItem>(`/api/library/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  updateLibrary: (
+    id: number,
+    body: Pick<LibraryItem, "name" | "finished" | "latest_episode" | "xunlei_url" | "quark_url" | "baidu_url">,
+  ) => request<LibraryItem>(`/api/library/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteLibrary: (id: number) => request<{ ok: boolean }>(`/api/library/${id}`, { method: "DELETE" }),
 };

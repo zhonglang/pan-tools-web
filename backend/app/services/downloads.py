@@ -15,7 +15,9 @@ _cancel: set[int] = set()
 
 
 def interrupt_orphans(session: Session) -> None:
-    rows = session.scalars(select(DownloadTask).where(DownloadTask.status == "running")).all()
+    rows = session.scalars(
+        select(DownloadTask).where(DownloadTask.status == "running")
+    ).all()
     moment = datetime.now(timezone.utc)
     for row in rows:
         row.status = "failed"
@@ -25,7 +27,15 @@ def interrupt_orphans(session: Session) -> None:
         session.commit()
 
 
-def start_save(session: Session, session_factory, client, cookie: str, user_id: int, account_id: int, target: str) -> DownloadTask:
+def start_save(
+    session: Session,
+    session_factory,
+    client,
+    cookie: str,
+    user_id: int,
+    account_id: int,
+    target: str,
+) -> DownloadTask:
     task = DownloadTask(
         user_id=user_id,
         account_id=account_id,
@@ -56,7 +66,9 @@ def cancel_save(session: Session, task: DownloadTask) -> DownloadTask:
     return task
 
 
-def _run_save(session_factory, client, task_id: int, account_id: int, cookie: str, target: str) -> None:
+def _run_save(
+    session_factory, client, task_id: int, account_id: int, cookie: str, target: str
+) -> None:
     with session_factory() as session:
         account = session.get(PanAccount, account_id)
         provider = account.provider if account is not None else "baidu"
@@ -66,7 +78,9 @@ def _run_save(session_factory, client, task_id: int, account_id: int, cookie: st
             _finish(session_factory, task_id, "cancelled")
             return
         planned = archive_entries(adapter, cookie, target)
-        files = [(name, remote, size) for name, remote, size in planned if remote is not None]
+        files = [
+            (name, remote, size) for name, remote, size in planned if remote is not None
+        ]
         _update(
             session_factory,
             task_id,
@@ -89,11 +103,18 @@ def _run_save(session_factory, client, task_id: int, account_id: int, cookie: st
             ),
             lambda: _stopped(task_id),
         )
-        _finish(session_factory, task_id, "done", directory=directory, current_name=None)
+        _finish(
+            session_factory, task_id, "done", directory=directory, current_name=None
+        )
     except DownloadCancelled:
         _finish(session_factory, task_id, "cancelled")
     except FolderTooLarge:
-        _finish(session_factory, task_id, "failed", error="目录里的文件太多，请进入下一级再下载")
+        _finish(
+            session_factory,
+            task_id,
+            "failed",
+            error="目录里的文件太多，请进入下一级再下载",
+        )
     except PathNotFound:
         _finish(session_factory, task_id, "failed", error="目标目录不存在")
     except LoginRejected:

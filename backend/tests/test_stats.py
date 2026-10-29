@@ -198,6 +198,7 @@ def test_history_stats_filters_by_name(client):
                     name="春晚合集",
                     path="/春晚",
                     url="https://pan.baidu.com/s/1spring",
+                    password="6666",
                     status="active",
                     transfer_count=3,
                     created_at=NOW,
@@ -222,6 +223,7 @@ def test_history_stats_filters_by_name(client):
     assert body["total"] == 2
     assert body["rank_total"] == 1
     assert [row["name"] for row in body["rows"]] == ["春晚合集"]
+    assert body["rows"][0]["url"] == "https://pan.baidu.com/s/1spring?pwd=6666"
 
 
 def test_history_stats_paginates_share_links(client):
@@ -641,7 +643,7 @@ def test_transfer_series_uses_account_stat_days(client):
 
 def test_daily_sync_skips_quark_and_xunlei(client):
     user_id, baidu_id = register(client, email="pans-sync@example.com")
-    ready = datetime(2026, 9, 22, 16, 5, tzinfo=timezone.utc)
+    ready = datetime(2026, 9, 22, 16, 1, tzinfo=timezone.utc)  # 上海 00:01
     with client.app.state.session_factory() as session:
         for provider, nickname in (("quark", "夸克"), ("xunlei", "迅雷")):
             session.add(
@@ -660,16 +662,16 @@ def test_daily_sync_skips_quark_and_xunlei(client):
         assert [job.account_id for job in jobs] == [baidu_id]
 
 
-def test_daily_sync_runs_once_after_five_past_midnight(client):
+def test_daily_sync_runs_once_in_first_two_minutes(client):
     _, account_id = register(client, email="daily@example.com")
-    too_early = datetime(2026, 9, 22, 16, 4, tzinfo=timezone.utc)
-    ready = datetime(2026, 9, 22, 16, 5, tzinfo=timezone.utc)
+    too_late = datetime(2026, 9, 22, 16, 2, tzinfo=timezone.utc)  # 上海 00:02
+    ready = datetime(2026, 9, 22, 16, 0, tzinfo=timezone.utc)  # 上海 00:00
     with client.app.state.session_factory() as session:
-        enqueue_daily_syncs(session, too_early)
+        enqueue_daily_syncs(session, too_late)
         session.commit()
         assert session.scalars(select(Job).where(Job.account_id == account_id, Job.type == "sync")).all() == []
         enqueue_daily_syncs(session, ready)
-        enqueue_daily_syncs(session, ready + timedelta(minutes=10))
+        enqueue_daily_syncs(session, ready + timedelta(minutes=1))
         session.commit()
         jobs = session.scalars(select(Job).where(Job.account_id == account_id, Job.type == "sync")).all()
         assert len(jobs) == 1
@@ -687,7 +689,7 @@ def test_daily_sync_does_not_run_in_the_evening(client):
 
 def test_midnight_sync_closes_the_previous_shanghai_day(client):
     user_id, account_id = register(client, email="close@example.com")
-    dawn = datetime(2026, 9, 23, 16, 5, tzinfo=timezone.utc)  # 上海 9 月 24 日 00:05
+    dawn = datetime(2026, 9, 23, 16, 1, tzinfo=timezone.utc)  # 上海 9 月 24 日 00:01
     record = {"shareId": 31, "shorturl": "1Close", "typicalPath": "/日终", "ctime": 1_700_000_000, "vCnt": 2, "tCnt": 6, "dCnt": 1}
     with client.app.state.session_factory() as session:
         job = Job(
@@ -716,3 +718,46 @@ def test_midnight_sync_closes_the_previous_shanghai_day(client):
         taken = shot.taken_at if shot.taken_at.tzinfo else shot.taken_at.replace(tzinfo=timezone.utc)
         assert taken.astimezone(timezone(timedelta(hours=8))).date().isoformat() == "2026-09-23"
         assert shot.transfer_count == 6
+
+
+def test_manual_sync_in_first_two_minutes_closes_previous_day(client):
+    user_id, account_id = register(client, email="manual-close@example.com")
+    dawn = datetime(2026, 9, 23, 16, 1, tzinfo=timezone.utc)  # 上海 9 月 24 日 00:01
+    later = datetime(2026, 9, 23, 16, 10, tzinfo=timezone.utc)  # 窗口外才执行
+    record = {
+        "shareId": 41,
+        "shorturl": "1Manual",
+        "typicalPath": "/手动",
+        "ctime": 1_700_000_000,
+        "vCnt": 3,
+        "tCnt": 4,
+        "dCnt": 1,
+    }
+    with client.app.state.session_factory() as session:
+        job = Job(
+            user_id=user_id,
+            account_id=account_id,
+            type="sync",
+            status="pending",
+            directory="/",
+            created_at=dawn,
+            updated_at=dawn,
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "gettemplatevariable" in str(request.url):
+            return httpx.Response(200, json={"errno": 0, "result": {"bdstoken": "bd-token"}})
+        return httpx.Response(200, json={"errno": 0, "list": [record]})
+
+    client.app.state.pan_http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    with client.app.state.session_factory() as session:
+        execute_sync(session, client.app.state.pan_http_client, session.get(Job, job_id), lambda _seconds: None, later)
+        session.commit()
+        shot = session.scalars(select(ShareStatSnapshot).where(ShareStatSnapshot.account_id == account_id)).one()
+        taken = shot.taken_at if shot.taken_at.tzinfo else shot.taken_at.replace(tzinfo=timezone.utc)
+        assert taken.astimezone(timezone(timedelta(hours=8))).date().isoformat() == "2026-09-23"
+        day = session.scalars(select(AccountStatDay).where(AccountStatDay.account_id == account_id)).one()
+        assert day.stat_date.isoformat() == "2026-09-23"

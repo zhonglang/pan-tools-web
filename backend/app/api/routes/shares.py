@@ -32,7 +32,9 @@ def _parent(path: str) -> str:
     return parent or "/"
 
 
-def _in_current_directory(provider: str, directory: str, path: str, listed: set[str] | None) -> bool:
+def _in_current_directory(
+    provider: str, directory: str, path: str, listed: set[str] | None
+) -> bool:
     if ".." in path.split("/"):
         return False
     if provider in {"quark", "xunlei"} and directory != "/":
@@ -69,7 +71,9 @@ def create_share_job(
         item_password = ""
     else:
         shared = (body.password or "").strip() or None
-        if shared is not None and (len(shared) != 4 or any(char not in _PASSWORD for char in shared)):
+        if shared is not None and (
+            len(shared) != 4 or any(char not in _PASSWORD for char in shared)
+        ):
             raise HTTPException(status_code=422, detail="提取码需要 4 位字母或数字")
         item_password = _password(shared)
     if not body.targets:
@@ -77,15 +81,21 @@ def create_share_job(
     moment = now_utc()
     listed: set[str] | None = None
     if directory != "/":
-        cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
+        cookie = decrypt_cookie(
+            account.cookie_ciphertext, get_settings().cookie_fernet_key
+        )
         try:
-            rows = adapter_for(account.provider, pan_client(request)).list_dir(cookie, directory)
+            rows = adapter_for(account.provider, pan_client(request)).list_dir(
+                cookie, directory
+            )
             listed = {row.path for row in rows}
         except LoginRejected as exc:
             account.status = "expired"
             account.updated_at = moment
             session.commit()
-            raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
+            raise HTTPException(
+                status_code=422, detail=relogin(account.provider)
+            ) from exc
         except PathNotFound as exc:
             raise HTTPException(status_code=422, detail="目标目录不存在") from exc
     for target in body.targets:

@@ -11,6 +11,9 @@ def get(session: Session, task_id: int) -> UploadTask | None:
 def list_for_user(session: Session, user_id: int, limit: int = 100) -> list[UploadTask]:
     return list(
         session.scalars(
-            select(UploadTask).where(UploadTask.user_id == user_id).order_by(UploadTask.id.desc()).limit(limit)
+            select(UploadTask)
+            .where(UploadTask.user_id == user_id)
+            .order_by(UploadTask.id.desc())
+            .limit(limit)
         ).all()
     )

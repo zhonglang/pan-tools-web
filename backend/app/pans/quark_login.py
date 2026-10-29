@@ -32,7 +32,9 @@ class PolledQr:
     nickname: str | None = None
 
 
-def _get(client: httpx.Client, url: str, params: dict, *, follow_redirects: bool = False) -> httpx.Response:
+def _get(
+    client: httpx.Client, url: str, params: dict, *, follow_redirects: bool = False
+) -> httpx.Response:
     try:
         return client.get(
             url,
@@ -75,7 +77,9 @@ def qr_login_url(token: str) -> str:
 
 def _qr_png(token: str) -> bytes:
     buffer = io.BytesIO()
-    segno.make(qr_login_url(token), error="m").save(buffer, kind="png", scale=8, border=2)
+    segno.make(qr_login_url(token), error="m").save(
+        buffer, kind="png", scale=8, border=2
+    )
     return buffer.getvalue()
 
 
@@ -100,7 +104,9 @@ def _json_object(response: httpx.Response) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _exchange_ticket(client: httpx.Client, ticket: str) -> tuple[str, str | None] | None:
+def _exchange_ticket(
+    client: httpx.Client, ticket: str
+) -> tuple[str, str | None] | None:
     url = "https://pan.quark.cn/account/info"
     params: dict[str, str] | None = {"st": ticket, "lw": "scan"}
     collected: dict[str, str] = {}
@@ -124,7 +130,9 @@ def _exchange_ticket(client: httpx.Client, ticket: str) -> tuple[str, str | None
         return None
     data = payload.get("data")
     raw_name = data.get("nickname") if isinstance(data, dict) else None
-    display_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+    display_name = (
+        raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+    )
     cookie = "; ".join(f"{name}={value}" for name, value in collected.items())
     return cookie, display_name
 
@@ -143,14 +151,28 @@ def start_qr(client: httpx.Client) -> StartedQr:
     except Exception as exc:
         raise QrLoginFailed() from exc
     token = _members(payload).get("token")
-    if not isinstance(payload, dict) or payload.get("status") != 2000000 or not isinstance(token, str) or not token:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("status") != 2000000
+        or not isinstance(token, str)
+        or not token
+    ):
         raise QrLoginFailed()
-    return StartedQr(sign=token, gid=request_id, image=_qr_png(token), content_type="image/png")
+    return StartedQr(
+        sign=token, gid=request_id, image=_qr_png(token), content_type="image/png"
+    )
 
 
 def poll_qr(client: httpx.Client, token: str, _request_id: str = "") -> PolledQr:
-    params = {"client_id": QR_CLIENT, "v": "1.2", "token": token, "request_id": str(uuid.uuid4())}
-    response = _get(client, "https://uop.quark.cn/cas/ajax/getServiceTicketByQrcodeToken", params)
+    params = {
+        "client_id": QR_CLIENT,
+        "v": "1.2",
+        "token": token,
+        "request_id": str(uuid.uuid4()),
+    }
+    response = _get(
+        client, "https://uop.quark.cn/cas/ajax/getServiceTicketByQrcodeToken", params
+    )
     if response.status_code != 200:
         return PolledQr("waiting")
     try:

@@ -15,17 +15,27 @@ def add_item(session: Session, item: JobItem) -> JobItem:
 
 
 def list_for_user(session: Session, user_id: int) -> list[Job]:
-    return list(session.scalars(select(Job).where(Job.user_id == user_id).order_by(Job.id.desc())).all())
+    return list(
+        session.scalars(
+            select(Job).where(Job.user_id == user_id).order_by(Job.id.desc())
+        ).all()
+    )
 
 
-def summaries_for_user(session: Session, user_id: int) -> list[tuple[Job, int, int, int]]:
+def summaries_for_user(
+    session: Session, user_id: int
+) -> list[tuple[Job, int, int, int]]:
     """Return (job, total, succeeded, failed) without N+1 item loads."""
     counts = (
         select(
             JobItem.job_id.label("job_id"),
             func.count().label("total"),
-            func.coalesce(func.sum(case((JobItem.status == "succeeded", 1), else_=0)), 0).label("succeeded"),
-            func.coalesce(func.sum(case((JobItem.status == "failed", 1), else_=0)), 0).label("failed"),
+            func.coalesce(
+                func.sum(case((JobItem.status == "succeeded", 1), else_=0)), 0
+            ).label("succeeded"),
+            func.coalesce(
+                func.sum(case((JobItem.status == "failed", 1), else_=0)), 0
+            ).label("failed"),
         )
         .group_by(JobItem.job_id)
         .subquery()
@@ -36,7 +46,10 @@ def summaries_for_user(session: Session, user_id: int) -> list[tuple[Job, int, i
         .where(Job.user_id == user_id)
         .order_by(Job.id.desc())
     ).all()
-    return [(job, int(total or 0), int(succeeded or 0), int(failed or 0)) for job, total, succeeded, failed in rows]
+    return [
+        (job, int(total or 0), int(succeeded or 0), int(failed or 0))
+        for job, total, succeeded, failed in rows
+    ]
 
 
 def get_for_user(session: Session, user_id: int, job_id: int) -> Job | None:
@@ -44,10 +57,18 @@ def get_for_user(session: Session, user_id: int, job_id: int) -> Job | None:
 
 
 def items_for(session: Session, job_id: int) -> list[JobItem]:
-    return list(session.scalars(select(JobItem).where(JobItem.job_id == job_id).order_by(JobItem.id)).all())
+    return list(
+        session.scalars(
+            select(JobItem).where(JobItem.job_id == job_id).order_by(JobItem.id)
+        ).all()
+    )
 
 
 def running_sync(session: Session, account_id: int) -> Job | None:
     return session.scalar(
-        select(Job).where(Job.account_id == account_id, Job.type == "sync", Job.status.in_(("pending", "running")))
+        select(Job).where(
+            Job.account_id == account_id,
+            Job.type == "sync",
+            Job.status.in_(("pending", "running")),
+        )
     )

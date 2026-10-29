@@ -148,10 +148,10 @@ export default function FolderPicker({
         role="dialog"
         aria-modal="true"
         aria-labelledby="folder-picker-title"
-        className="flex max-h-full w-full max-w-lg flex-col rounded-2xl border border-line bg-white p-6"
+        className="flex max-h-[calc(100vh-3rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-white p-6"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between">
+        <div className="flex shrink-0 items-center justify-between">
           <h2 id="folder-picker-title" className="text-xl font-semibold text-[#1f2430]">
             选择文件夹
           </h2>
@@ -160,7 +160,7 @@ export default function FolderPicker({
           </button>
         </div>
 
-        <div className="mt-4 flex items-center gap-3 border-b border-[#eef0f4] pb-3 text-sm">
+        <div className="mt-4 flex shrink-0 items-center gap-3 border-b border-[#eef0f4] pb-3 text-sm">
           <button
             type="button"
             disabled={!canGoBack}
@@ -188,7 +188,7 @@ export default function FolderPicker({
           </nav>
         </div>
 
-        <div className="mt-2 min-h-64 flex-1 overflow-y-auto">
+        <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
           {loading ? <p className="px-2 py-8 text-sm text-[#98a2b3]">正在读取目录</p> : null}
           {!loading && folders.length === 0 ? <p className="px-2 py-8 text-sm text-[#98a2b3]">这个目录下没有文件夹</p> : null}
           {!loading
@@ -210,52 +210,54 @@ export default function FolderPicker({
             : null}
         </div>
 
-        {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
+        <div className="shrink-0">
+          {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
 
-        <div className="mt-3 rounded-xl bg-[#f7f8fa] px-4 py-3 text-sm text-[#98a2b3]">
-          已选择： <span className="text-[#344054]">{selectedLabel}</span>
-        </div>
+          <div className="mt-3 rounded-xl bg-[#f7f8fa] px-4 py-3 text-sm text-[#98a2b3]">
+            已选择： <span className="text-[#344054]">{selectedLabel}</span>
+          </div>
 
-        {naming ? (
-          <form
-            className="mt-3 flex gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createFolder();
-            }}
-          >
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="请输入文件夹名称"
-              aria-label="文件夹名称"
-              className="h-10 min-w-0 flex-1 rounded-xl border border-[#e4e7ee] px-3 text-sm outline-none"
-            />
-            <button type="submit" disabled={creating} className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white disabled:opacity-50">
-              {creating ? "正在创建" : "创建"}
+          {naming ? (
+            <form
+              className="mt-3 flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createFolder();
+              }}
+            >
+              <input
+                autoFocus
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="请输入文件夹名称"
+                aria-label="文件夹名称"
+                className="h-10 min-w-0 flex-1 rounded-xl border border-[#e4e7ee] px-3 text-sm outline-none"
+              />
+              <button type="submit" disabled={creating} className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white disabled:opacity-50">
+                {creating ? "正在创建" : "创建"}
+              </button>
+            </form>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setNaming(true);
+                setError("");
+              }}
+              className="mt-3 inline-flex h-10 items-center gap-2 rounded-xl border border-[#e4e7ee] px-3 text-sm text-[#344054]"
+            >
+              新建文件夹
             </button>
-          </form>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setNaming(true);
-              setError("");
-            }}
-            className="mt-3 inline-flex h-10 items-center gap-2 rounded-xl border border-[#e4e7ee] px-3 text-sm text-[#344054]"
-          >
-            新建文件夹
-          </button>
-        )}
+          )}
 
-        <div className="mt-5 flex justify-end gap-3">
-          <button type="button" onClick={onCancel} className="h-10 rounded-xl border border-[#e4e7ee] px-4 text-sm">
-            取消
-          </button>
-          <button type="button" onClick={() => onConfirm(selected, selectionTrail())} className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white">
-            确认选择
-          </button>
+          <div className="mt-5 flex justify-end gap-3">
+            <button type="button" onClick={onCancel} className="h-10 rounded-xl border border-[#e4e7ee] px-4 text-sm">
+              取消
+            </button>
+            <button type="button" onClick={() => onConfirm(selected, selectionTrail())} className="h-10 rounded-xl bg-ink px-4 text-sm font-medium text-white">
+              确认选择
+            </button>
+          </div>
         </div>
       </div>
     </div>

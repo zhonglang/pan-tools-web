@@ -30,6 +30,10 @@ class FilePathIn(BaseModel):
     path: str = Field(min_length=1, max_length=1024)
 
 
+class FilePathsIn(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=500)
+
+
 class RenameIn(BaseModel):
     path: str = Field(min_length=1, max_length=1024)
     name: str = Field(min_length=1, max_length=255)

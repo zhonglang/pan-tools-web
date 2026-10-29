@@ -1,7 +1,6 @@
 import httpx
 
 from app.pans.baidu import BaiduAdapter
-from app.pans.closed import ClosedAdapter
 from app.pans.errors import LoginRejected, ProviderClosed
 
 __all__ = ["LoginRejected", "ProviderClosed", "adapter_for"]

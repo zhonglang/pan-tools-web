@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 
 import httpx
 
@@ -16,10 +20,12 @@ from app.pans.xunlei import XunleiAdapter
 from app.services.links import ParsedLink, parse_share_link
 
 BAIDU_DEAD = {2, -21, 105, 110, 111, 115, 116}
-BAIDU_ALIVE = {-9, -12}
 XUNLEI_ALIVE = {"OK", "PASS_CODE_ERROR"}
-DEAD_WORDS = ("不存在", "失效", "过期", "取消", "删除")
+DEAD_WORDS = ("不存在", "失效", "过期", "取消", "删除", "违规")
 PAN_ORDER = {"baidu": 0, "quark": 1, "xunlei": 2}
+_BAIDU_ERRNO = re.compile(r'"errno"\s*:\s*(-?\d+)')
+_BAIDU_PAGE_TYPE = re.compile(r'"share_page_type"\s*:\s*"([^"]+)"')
+_thread_clients = threading.local()
 
 
 @dataclass(frozen=True)
@@ -40,9 +46,16 @@ class LinkCheck:
 
 def classify_baidu(payload: dict) -> str:
     errno = payload.get("errno")
-    if errno == 0 or errno in BAIDU_ALIVE:
+    if errno == 0:
         return "ok"
     if errno in BAIDU_DEAD:
+        return "invalid"
+    message = (
+        payload.get("show_msg") if isinstance(payload.get("show_msg"), str) else ""
+    )
+    if any(word in message for word in DEAD_WORDS):
+        return "invalid"
+    if payload.get("share_page_type") == "error":
         return "invalid"
     return "unknown"
 
@@ -76,7 +89,11 @@ def classify_xunlei(payload: dict) -> str:
         return "invalid"
     text = " ".join(
         value
-        for value in (payload.get("error"), payload.get("error_description"), payload.get("message"))
+        for value in (
+            payload.get("error"),
+            payload.get("error_description"),
+            payload.get("message"),
+        )
         if isinstance(value, str)
     )
     if any(word in text for word in (*DEAD_WORDS, "not_found")):
@@ -87,25 +104,35 @@ def classify_xunlei(payload: dict) -> str:
 def check_library_links(items: list[LibraryItem], client: httpx.Client) -> LinkCheck:
     jobs: list[tuple[LibraryItem, str, ParsedLink]] = []
     for item in items:
-        for provider, raw in (("baidu", item.baidu_url), ("quark", item.quark_url), ("xunlei", item.xunlei_url)):
+        for provider, raw in (
+            ("baidu", item.baidu_url),
+            ("quark", item.quark_url),
+            ("xunlei", item.xunlei_url),
+        ):
             parsed = parse_share_link(raw or "")
             if parsed is None or parsed.provider != provider:
                 continue
             jobs.append((item, provider, parsed))
-    guest = _xunlei_guest(client) if any(provider == "xunlei" for _, provider, _ in jobs) else None
+    guest = (
+        _xunlei_guest(client)
+        if any(provider == "xunlei" for _, provider, _ in jobs)
+        else None
+    )
 
     def run(job: tuple[LibraryItem, str, ParsedLink]) -> str:
         _item, provider, parsed = job
-        try:
-            if provider == "baidu":
-                return classify_baidu(_baidu_payload(client, parsed))
-            if provider == "quark":
-                return classify_quark(_quark_payload(client, parsed))
-            if guest is None:
+        # 每个任务独立 Client：共用 jar 时百度 PANPSC 会污染后续请求，把有效链接打成 404。
+        with _scoped_client(client) as scoped:
+            try:
+                if provider == "baidu":
+                    return classify_baidu(_baidu_payload(scoped, parsed))
+                if provider == "quark":
+                    return classify_quark(_quark_payload(scoped, parsed))
+                if guest is None:
+                    return "unknown"
+                return classify_xunlei(_xunlei_payload(scoped, parsed, guest))
+            except Exception:
                 return "unknown"
-            return classify_xunlei(_xunlei_payload(client, parsed, guest))
-        except Exception:
-            return "unknown"
 
     invalid: list[DeadLink] = []
     unknown = 0
@@ -114,24 +141,77 @@ def check_library_links(items: list[LibraryItem], client: httpx.Client) -> LinkC
             states = list(pool.map(run, jobs))
         for (item, provider, _parsed), state in zip(jobs, states, strict=True):
             if state == "invalid":
-                invalid.append(DeadLink(item.id, item.prefix, item.name, provider, "链接已失效"))
+                invalid.append(
+                    DeadLink(item.id, item.prefix, item.name, provider, "链接已失效")
+                )
             elif state == "unknown":
                 unknown += 1
-    invalid.sort(key=lambda hit: (int(hit.prefix), hit.prefix, PAN_ORDER.get(hit.provider, 9), hit.id))
+    invalid.sort(
+        key=lambda hit: (
+            int(hit.prefix),
+            hit.prefix,
+            PAN_ORDER.get(hit.provider, 9),
+            hit.id,
+        )
+    )
     return LinkCheck(checked=len(jobs), invalid=invalid, unknown=unknown)
 
 
+@contextmanager
+def _scoped_client(client: httpx.Client) -> Iterator[httpx.Client]:
+    """每线程独立 Client，并清空 cookie，避免 PANPSC 串请求导致误判 404。"""
+    transport = client._transport
+    if isinstance(transport, httpx.MockTransport):
+        scoped = httpx.Client(
+            transport=transport, timeout=client.timeout, follow_redirects=False
+        )
+        try:
+            yield scoped
+        finally:
+            scoped.close()
+        return
+    scoped = getattr(_thread_clients, "client", None)
+    if scoped is None:
+        scoped = httpx.Client(timeout=client.timeout, follow_redirects=False)
+        _thread_clients.client = scoped
+    scoped.cookies.clear()
+    try:
+        yield scoped
+    finally:
+        scoped.cookies.clear()
+
+
 def _baidu_payload(client: httpx.Client, parsed: ParsedLink) -> dict:
-    response = client.post(
-        "https://pan.baidu.com/share/verify",
-        params={"surl": parsed.surl, "channel": "chunlei", "web": 1, "app_id": 250528, "clienttype": 0},
-        data={"pwd": parsed.password or ""},
+    # 不验提取码：打开分享页即可区分失效/违规与仍需提取码的有效链接。
+    response = client.get(
+        f"https://pan.baidu.com/s/1{parsed.surl}",
         headers={
             "User-Agent": QUARK_UA,
-            "Referer": f"https://pan.baidu.com/share/init?surl={parsed.surl}",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Encoding": "identity",
         },
+        follow_redirects=False,
     )
-    return response.json() if response.status_code == 200 else {}
+    if response.status_code in {301, 302, 303, 307, 308}:
+        location = response.headers.get("location") or ""
+        if "share/init" in location:
+            return {"errno": 0}
+        return {}
+    if response.status_code == 404:
+        return {"errno": 105}
+    if response.status_code != 200:
+        return {}
+    text = response.text
+    match = _BAIDU_ERRNO.search(text)
+    page_type = _BAIDU_PAGE_TYPE.search(text)
+    payload: dict = {}
+    if match is not None:
+        payload["errno"] = int(match.group(1))
+    if page_type is not None:
+        payload["share_page_type"] = page_type.group(1)
+    if "errno" not in payload and payload.get("share_page_type") != "error":
+        payload["errno"] = 0
+    return payload
 
 
 def _quark_payload(client: httpx.Client, parsed: ParsedLink) -> dict:
@@ -166,7 +246,11 @@ def _xunlei_guest(client: httpx.Client) -> dict | None:
 def _xunlei_payload(client: httpx.Client, parsed: ParsedLink, guest: dict) -> dict:
     response = client.get(
         f"{XUNLEI_API}/share",
-        params={"share_id": parsed.surl, "pass_code": parsed.password or "", "limit": "1"},
+        params={
+            "share_id": parsed.surl,
+            "pass_code": parsed.password or "",
+            "limit": "1",
+        },
         headers={
             "User-Agent": XUNLEI_UA,
             "x-device-id": guest["device_id"],

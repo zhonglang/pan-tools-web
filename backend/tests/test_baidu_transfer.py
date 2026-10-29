@@ -232,6 +232,26 @@ def test_rename_delete_and_share_use_file_manager():
     assert link == "https://pan.baidu.com/s/1AbCdEf?pwd=ab12"
 
 
+def test_baidu_delete_many_sends_all_paths_once():
+    from urllib.parse import parse_qs
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "gettemplatevariable" in url:
+            return httpx.Response(200, json={"errno": 0, "result": {"bdstoken": "bd-token"}})
+        if "filemanager" in url and request.url.params["opera"] == "delete":
+            form = parse_qs(request.content.decode())
+            seen["filelist"] = json.loads(form["filelist"][0])
+            return httpx.Response(200, json={"errno": 0})
+        raise AssertionError(url)
+
+    adapter = BaiduAdapter(httpx.Client(transport=httpx.MockTransport(handler)))
+    adapter.delete_many(COOKIE, ["/a.txt", "/文件夹", "/b.txt"])
+    assert seen["filelist"] == ["/a.txt", "/文件夹", "/b.txt"]
+
+
 def test_copy_uses_file_manager():
     from urllib.parse import parse_qs
 

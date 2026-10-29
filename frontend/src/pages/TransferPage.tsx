@@ -5,6 +5,7 @@ import {
   type CopyTargetResult,
   type DirEntry,
   type DownloadTask,
+  type LinkedRenameMember,
   type PanAccount,
   type UploadTask,
   type User,
@@ -40,6 +41,42 @@ function uploadLabel(task: UploadTask) {
   if (task.status === "done") return `已上传「${task.name}」`;
   if (task.status === "cancelled") return `已取消「${task.name}」`;
   return task.error || "上传失败";
+}
+
+type BrowseMemory = {
+  accountId: number;
+  directory: string;
+  trail: { name: string; path: string }[];
+};
+
+function browseStorageKey(userId: number) {
+  return `pan-tools:transfer:browse:${userId}`;
+}
+
+function loadBrowseMemory(userId: number): BrowseMemory | null {
+  try {
+    const raw = localStorage.getItem(browseStorageKey(userId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<BrowseMemory>;
+    if (typeof parsed.accountId !== "number" || typeof parsed.directory !== "string") return null;
+    const trail = Array.isArray(parsed.trail)
+      ? parsed.trail.filter(
+          (item): item is { name: string; path: string } =>
+            !!item && typeof item.name === "string" && typeof item.path === "string",
+        )
+      : [{ name: "根目录", path: "/" }];
+    return { accountId: parsed.accountId, directory: parsed.directory, trail: trail.length ? trail : [{ name: "根目录", path: "/" }] };
+  } catch {
+    return null;
+  }
+}
+
+function saveBrowseMemory(userId: number, memory: BrowseMemory) {
+  try {
+    localStorage.setItem(browseStorageKey(userId), JSON.stringify(memory));
+  } catch {
+    /* ignore quota / private mode */
+  }
 }
 
 type TableSort = { key: "name" | "created" | "modified"; dir: "asc" | "desc" };
@@ -200,6 +237,16 @@ function CopyIcon() {
   );
 }
 
+function MoreIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden="true">
+      <circle cx="6" cy="12" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="18" cy="12" r="1.6" />
+    </svg>
+  );
+}
+
 export default function TransferPage({ user }: { user: User }) {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState<PanAccount[]>([]);
@@ -230,6 +277,9 @@ export default function TransferPage({ user }: { user: User }) {
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<DirEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [linkedRename, setLinkedRename] = useState(false);
+  const [linkedPrimary, setLinkedPrimary] = useState<LinkedRenameMember | null>(null);
+  const [notice, setNotice] = useState("");
   const renameLock = useRef(false);
   const renameTargetRef = useRef<DirEntry | null>(null);
   renameTargetRef.current = renameTarget;
@@ -262,6 +312,8 @@ export default function TransferPage({ user }: { user: User }) {
   const [batchStart, setBatchStart] = useState("");
   const [batchError, setBatchError] = useState("");
   const [batchPending, setBatchPending] = useState(false);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchDeletePending, setBatchDeletePending] = useState(false);
   const [shareResult, setShareResult] = useState<{ name: string; url: string; password: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState("");
@@ -293,13 +345,33 @@ export default function TransferPage({ user }: { user: User }) {
       .accounts()
       .then((rows) => {
         setAccounts(rows);
+        const remembered = loadBrowseMemory(user.id);
+        const rememberedOk =
+          remembered !== null && rows.some((row) => row.id === remembered.accountId);
+        if (rememberedOk && remembered) {
+          setAccountId(remembered.accountId);
+          setDirectory(remembered.directory || "/");
+          setTrail(remembered.trail);
+          return;
+        }
         setAccountId((current) => {
           if (current !== null && rows.some((row) => row.id === current)) return current;
-          const first = rows.find((row) => (row.provider === "baidu" || row.provider === "quark" || row.provider === "xunlei") && row.status === "valid") ?? rows[0];
+          const first =
+            rows.find(
+              (row) =>
+                (row.provider === "baidu" || row.provider === "quark" || row.provider === "xunlei") &&
+                row.status === "valid",
+            ) ?? rows[0];
           return first?.id ?? null;
         });
       })
       .catch((caught: Error) => setError(caught.message));
+    api
+      .linkedRenameConfig()
+      .then((config) => {
+        setLinkedPrimary(config.members.find((row) => row.is_primary) ?? null);
+      })
+      .catch(() => setLinkedPrimary(null));
     if (!user.paid_features) return;
     api
       .sharePasswords()
@@ -311,7 +383,12 @@ export default function TransferPage({ user }: { user: User }) {
         }),
       )
       .catch(() => setShareDefaults({ baidu: "", quark: "", xunlei: "" }));
-  }, [user.paid_features]);
+  }, [user.id, user.paid_features]);
+
+  useEffect(() => {
+    if (accountId === null) return;
+    saveBrowseMemory(user.id, { accountId, directory, trail });
+  }, [accountId, directory, trail, user.id]);
 
   const hasRunningDownloads = downloads.some((task) => task.status === "running");
   const hasRunningUploads = uploads.some((task) => task.status === "running");
@@ -559,6 +636,7 @@ export default function TransferPage({ user }: { user: User }) {
   function cancelRename() {
     if (renameLock.current) return;
     setRenameTarget(null);
+    setLinkedRename(false);
   }
 
   async function confirmRename() {
@@ -566,6 +644,7 @@ export default function TransferPage({ user }: { user: User }) {
     const name = renameValue.trim();
     if (name === renameTarget.name) {
       setRenameTarget(null);
+      setLinkedRename(false);
       return;
     }
     if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
@@ -575,9 +654,20 @@ export default function TransferPage({ user }: { user: User }) {
     renameLock.current = true;
     setBusyPath(renameTarget.path);
     setError("");
+    setNotice("");
     try {
-      await api.renameFile(accountId, renameTarget.path, name);
+      if (linkedRename) {
+        const result = await api.linkedRename(accountId, renameTarget.path, renameTarget.name, name);
+        if (result.failed > 0) {
+          setError(result.errors[0] || "部分关联重命名失败");
+        } else {
+          setNotice("已关联改名");
+        }
+      } else {
+        await api.renameFile(accountId, renameTarget.path, name);
+      }
       setRenameTarget(null);
+      setLinkedRename(false);
       setReloadKey((value) => value + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "重命名失败");
@@ -586,6 +676,11 @@ export default function TransferPage({ user }: { user: User }) {
       setBusyPath(null);
     }
   }
+
+  const onPrimaryLinkedDir =
+    linkedPrimary != null &&
+    accountId === linkedPrimary.account_id &&
+    directory === linkedPrimary.directory;
 
   async function confirmDelete() {
     if (accountId === null || deleteTarget === null || busyPath) return;
@@ -701,6 +796,29 @@ export default function TransferPage({ user }: { user: User }) {
   const baiduLocked = account?.provider === "baidu";
   const xunleiQuick = account?.provider === "xunlei";
   const columnCount = user.paid_features ? 6 : 5;
+
+  async function confirmBatchDelete() {
+    if (accountId === null || batchDeletePending || chosen.length === 0) return;
+    setBatchDeletePending(true);
+    setError("");
+    setNotice("");
+    const targets = [...chosen];
+    try {
+      await api.deleteFiles(
+        accountId,
+        targets.map((entry) => entry.path),
+      );
+      setChecked({});
+      setBatchDeleteOpen(false);
+      setReloadKey((value) => value + 1);
+      setNotice(`已删除 ${targets.length} 项`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "删除失败");
+      setReloadKey((value) => value + 1);
+    } finally {
+      setBatchDeletePending(false);
+    }
+  }
 
   function openBatchRename() {
     setBatchSide("front");
@@ -864,6 +982,19 @@ export default function TransferPage({ user }: { user: User }) {
               >
                 批量重命名
               </button>
+              <button
+                type="button"
+                disabled={!canBrowse || chosen.length === 0 || batchDeletePending}
+                onClick={() => {
+                  setError("");
+                  setBatchDeleteOpen(true);
+                }}
+                className="inline-flex h-9 shrink-0 items-center justify-center whitespace-nowrap rounded-full border border-[#fecdca] bg-white px-4 text-sm font-medium text-[#b42318] disabled:opacity-40"
+              >
+                删除
+                <span className="inline-block min-w-[2ch] text-center tabular-nums">{chosen.length}</span>
+                项
+              </button>
             </>
           ) : null}
           <button
@@ -965,6 +1096,7 @@ export default function TransferPage({ user }: { user: User }) {
         </div>
 
         {error ? <p className="mx-4 mt-3 rounded-xl bg-red-50 px-4 py-3 text-sm text-danger">{error}</p> : null}
+        {notice ? <p className="mx-4 mt-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-[#067647]">{notice}</p> : null}
 
         <div className="min-h-0 flex-1 overflow-auto">
           {account === null ? (
@@ -978,7 +1110,7 @@ export default function TransferPage({ user }: { user: User }) {
               重新登录。
             </p>
           ) : (
-            <table className="w-full text-left text-sm">
+            <table className="w-full table-fixed text-left text-sm">
               <thead className="sticky top-0 z-10 bg-[#f7f8fa] text-xs text-[#98a2b3]">
                 <tr>
                   {user.paid_features ? (
@@ -995,7 +1127,10 @@ export default function TransferPage({ user }: { user: User }) {
                       />
                     </th>
                   ) : null}
-                  <th className="sticky left-0 bg-[#f7f8fa] px-3 py-3 font-medium" aria-sort={tableSort?.key === "name" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}>
+                  <th
+                    className="sticky left-0 w-72 max-w-72 bg-[#f7f8fa] px-3 py-3 font-medium"
+                    aria-sort={tableSort?.key === "name" ? (tableSort.dir === "asc" ? "ascending" : "descending") : "none"}
+                  >
                     <button
                       type="button"
                       onClick={() => {
@@ -1103,17 +1238,17 @@ export default function TransferPage({ user }: { user: User }) {
                           </td>
                         ) : null}
                         <td
-                          className={`sticky left-0 px-3 py-3.5 ${
+                          className={`sticky left-0 w-72 max-w-72 overflow-hidden px-3 py-3.5 ${
                             selected === entry.path ? "bg-muted" : "bg-white group-hover:bg-[#fafafa]"
                           }`}
                         >
                           <span className="flex min-w-0 items-center gap-1.5">
-                            {entry.is_dir ? <FolderIcon /> : <FileIcon />}
+                            <span className="shrink-0">{entry.is_dir ? <FolderIcon /> : <FileIcon />}</span>
                             {renameTarget?.path === entry.path ? (
                               <input
                                 autoFocus
                                 value={renameValue}
-                                aria-label={`重命名 ${entry.name}`}
+                                aria-label={`${linkedRename ? "关联重命名" : "重命名"} ${entry.name}`}
                                 disabled={busyPath === entry.path}
                                 onFocus={(event) => event.currentTarget.select()}
                                 onClick={(event) => event.stopPropagation()}
@@ -1135,11 +1270,15 @@ export default function TransferPage({ user }: { user: User }) {
                                     cancelRename();
                                   }
                                 }}
-                                className="h-8 w-full min-w-[12rem] max-w-md flex-1 rounded-lg border border-[#d0d5dd] bg-white px-2 font-medium text-[#1f2430] outline-none disabled:opacity-60"
+                                className={`h-8 min-w-0 flex-1 rounded-lg border bg-white px-2 font-medium text-[#1f2430] outline-none disabled:opacity-60 ${
+                                  linkedRename ? "border-[#6941c6]" : "border-[#d0d5dd]"
+                                }`}
                               />
                             ) : (
                               <>
-                                <span className="truncate font-medium text-[#1f2430]">{entry.name}</span>
+                                <span className="min-w-0 flex-1 truncate font-medium text-[#1f2430]" title={entry.name}>
+                                  {entry.name}
+                                </span>
                                 <button
                                   type="button"
                                   aria-label={`复制名称 ${entry.name}`}
@@ -1163,7 +1302,7 @@ export default function TransferPage({ user }: { user: User }) {
                         </td>
                         <td className="px-3 py-3.5">
                           <span
-                            className={`flex gap-3 whitespace-nowrap text-sm font-medium ${
+                            className={`flex items-center gap-3 whitespace-nowrap text-sm font-medium ${
                               selected === entry.path
                                 ? "opacity-100"
                                 : "opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
@@ -1183,20 +1322,6 @@ export default function TransferPage({ user }: { user: User }) {
                             </button>
                             <button
                               type="button"
-                              className="text-[#0e7490] disabled:opacity-40"
-                              disabled={busyPath === entry.path}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setCopyError("");
-                                setCopyFailures([]);
-                                setCopyTarget(entry);
-                              }}
-                              onDoubleClick={(event) => event.stopPropagation()}
-                            >
-                              复制到
-                            </button>
-                            <button
-                              type="button"
                               className="text-primary disabled:opacity-40"
                               disabled={busyPath === entry.path}
                               onClick={(event) => {
@@ -1207,20 +1332,6 @@ export default function TransferPage({ user }: { user: User }) {
                             >
                               下载
                             </button>
-                            {entry.is_dir ? (
-                              <button
-                                type="button"
-                                className="text-[#0e7490] disabled:opacity-40"
-                                disabled={!canBrowse || busyPath === entry.path}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setUploadChooserDest(entry.path);
-                                }}
-                                onDoubleClick={(event) => event.stopPropagation()}
-                              >
-                                上传到此
-                              </button>
-                            ) : null}
                             <button
                               type="button"
                               className="text-[#f79009] disabled:opacity-40"
@@ -1229,6 +1340,8 @@ export default function TransferPage({ user }: { user: User }) {
                               onClick={(event) => {
                                 event.stopPropagation();
                                 setError("");
+                                setNotice("");
+                                setLinkedRename(false);
                                 setRenameValue(entry.name);
                                 setRenameTarget(entry);
                               }}
@@ -1236,19 +1349,80 @@ export default function TransferPage({ user }: { user: User }) {
                             >
                               重命名
                             </button>
-                            <button
-                              type="button"
-                              className="text-[#f04438] disabled:opacity-40"
-                              disabled={busyPath === entry.path}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setError("");
-                                setDeleteTarget(entry);
-                              }}
-                              onDoubleClick={(event) => event.stopPropagation()}
-                            >
-                              删除
-                            </button>
+                            <span className="relative z-20" onDoubleClick={(event) => event.stopPropagation()}>
+                              <span className="group/more relative inline-flex">
+                                <button
+                                  type="button"
+                                  aria-label="更多"
+                                  title="更多"
+                                  className="grid h-7 w-7 place-items-center rounded-md text-[#667085] hover:bg-[#e8f3ff] hover:text-[#2f6fed] group-hover/more:bg-[#e8f3ff] group-hover/more:text-[#2f6fed]"
+                                  onClick={(event) => event.stopPropagation()}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                >
+                                  <MoreIcon />
+                                </button>
+                                <span className="invisible absolute right-0 top-full z-30 pt-1 opacity-0 group-hover/more:visible group-hover/more:opacity-100 group-focus-within/more:visible group-focus-within/more:opacity-100">
+                                  <span className="block min-w-[7.5rem] rounded-xl border border-line bg-white py-1 shadow-lg">
+                                    <button
+                                      type="button"
+                                      className="block w-full px-3 py-2 text-left text-sm text-[#0e7490] hover:bg-[#f8fafc] disabled:opacity-40"
+                                      disabled={busyPath === entry.path}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setCopyError("");
+                                        setCopyFailures([]);
+                                        setCopyTarget(entry);
+                                      }}
+                                    >
+                                      复制到
+                                    </button>
+                                    {entry.is_dir ? (
+                                      <button
+                                        type="button"
+                                        className="block w-full px-3 py-2 text-left text-sm text-[#0e7490] hover:bg-[#f8fafc] disabled:opacity-40"
+                                        disabled={!canBrowse || busyPath === entry.path}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setUploadChooserDest(entry.path);
+                                        }}
+                                      >
+                                        上传到此
+                                      </button>
+                                    ) : null}
+                                    {onPrimaryLinkedDir && entry.is_dir ? (
+                                      <button
+                                        type="button"
+                                        className="block w-full px-3 py-2 text-left text-sm text-[#6941c6] hover:bg-[#f8fafc] disabled:opacity-40"
+                                        disabled={busyPath === entry.path}
+                                        onMouseDown={(event) => event.preventDefault()}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setError("");
+                                          setNotice("");
+                                          setLinkedRename(true);
+                                          setRenameValue(entry.name);
+                                          setRenameTarget(entry);
+                                        }}
+                                      >
+                                        关联重命名
+                                      </button>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="block w-full px-3 py-2 text-left text-sm text-[#f04438] hover:bg-[#f8fafc] disabled:opacity-40"
+                                      disabled={busyPath === entry.path}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setError("");
+                                        setDeleteTarget(entry);
+                                      }}
+                                    >
+                                      删除
+                                    </button>
+                                  </span>
+                                </span>
+                              </span>
+                            </span>
                           </span>
                         </td>
                         <td className="w-36 px-3 py-3.5">
@@ -1503,6 +1677,50 @@ export default function TransferPage({ user }: { user: User }) {
               >
                 {busyPath === deleteTarget.path ? <Spinner light /> : null}
                 {busyPath === deleteTarget.path ? "正在删除" : "删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {batchDeleteOpen ? (
+        <div
+          className="fixed inset-0 z-30 grid place-items-center bg-[#101828]/40 px-4"
+          onClick={() => {
+            if (!batchDeletePending) setBatchDeleteOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="batch-delete-title"
+            className="w-full max-w-md rounded-2xl bg-white p-6 border border-line"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="batch-delete-title" className="text-lg font-semibold text-[#1f2430]">
+              删除
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-[#667085]">
+              {batchDeletePending
+                ? "正在删除，请稍候"
+                : `确定把已选的 ${chosen.length} 项移到网盘回收站？`}
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={batchDeletePending}
+                onClick={() => setBatchDeleteOpen(false)}
+                className="h-10 rounded-xl px-4 text-sm text-[#667085] disabled:opacity-40"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={batchDeletePending || chosen.length === 0}
+                onClick={() => void confirmBatchDelete()}
+                className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#f04438] px-4 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {batchDeletePending ? <Spinner light /> : null}
+                {batchDeletePending ? "正在删除" : "删除"}
               </button>
             </div>
           </div>

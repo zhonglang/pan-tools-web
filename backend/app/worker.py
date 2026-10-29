@@ -19,11 +19,17 @@ def run_once(session_factory, client: httpx.Client) -> bool:
         reclaim_stale(session, now)
         enqueue_daily_syncs(session, now)
         job = session.scalar(
-            select(Job).where(Job.type.in_(("transfer", "share", "sync")), Job.status == "running").order_by(Job.id)
+            select(Job)
+            .where(Job.type.in_(("transfer", "share", "sync")), Job.status == "running")
+            .order_by(Job.id)
         )
         if job is None:
             job = session.scalar(
-                select(Job).where(Job.type.in_(("transfer", "share", "sync")), Job.status == "pending").order_by(Job.id)
+                select(Job)
+                .where(
+                    Job.type.in_(("transfer", "share", "sync")), Job.status == "pending"
+                )
+                .order_by(Job.id)
             )
         if job is None:
             session.commit()

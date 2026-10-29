@@ -1,6 +1,7 @@
 import secrets
 import string
 import tempfile
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -16,7 +17,12 @@ from app.crud.accounts import get_for_user
 from app.crud.downloads import get as get_download
 from app.crud.downloads import list_for_user as list_user_downloads
 from app.crud.jobs import add as add_job
-from app.crud.jobs import add_item, get_for_user as get_job_for_user, items_for, summaries_for_user
+from app.crud.jobs import (
+    add_item,
+    get_for_user as get_job_for_user,
+    items_for,
+    summaries_for_user,
+)
 from app.crud.uploads import get as get_upload
 from app.crud.uploads import list_for_user as list_user_uploads
 from app.models import DownloadTask, Job, JobItem, PanAccount, UploadTask, User
@@ -26,7 +32,13 @@ from app.services.folder_download import FolderTooLarge, archive_body, archive_e
 from app.services.uploads import cancel_upload, start_upload, upload_max_bytes
 from app.pans import adapter_for
 from app.pans.baidu import BaiduAdapter
-from app.pans.errors import DuplicateName, LoginRejected, NotAFile, PathNotFound, TransferFailed
+from app.pans.errors import (
+    DuplicateName,
+    LoginRejected,
+    NotAFile,
+    PathNotFound,
+    TransferFailed,
+)
 from app.services.zip_stream import stored_zip_size
 from app.services.quota import QuotaRejected, reserve_transfers
 from app.schemas import (
@@ -37,6 +49,7 @@ from app.schemas import (
     DirEntryOut,
     DownloadTaskOut,
     FilePathIn,
+    FilePathsIn,
     JobItemOut,
     JobOut,
     JobSummaryOut,
@@ -47,7 +60,9 @@ from app.schemas import (
     TransferIn,
     UploadTaskOut,
 )
+from app.schemas.linked_rename import LinkedRenameIn, LinkedRenameOut
 from app.services.copying import MAX_RENAME_ATTEMPTS, next_copy_name, validate_targets
+from app.services.linked_rename import linked_rename, list_members, primary_member
 from app.services.transfers import clean_directory_label, normalize_directory
 
 router = APIRouter(tags=["transfers"])
@@ -67,7 +82,9 @@ def relogin(provider: str) -> str:
     return f"请重新登录{name}"
 
 
-def owned_baidu(session: Session, user: User, account_id: int, *, allow_expired: bool = False) -> PanAccount:
+def owned_baidu(
+    session: Session, user: User, account_id: int, *, allow_expired: bool = False
+) -> PanAccount:
     account = get_for_user(session, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -78,7 +95,9 @@ def owned_baidu(session: Session, user: User, account_id: int, *, allow_expired:
     return account
 
 
-def owned_drive(session: Session, user: User, account_id: int, *, allow_expired: bool = False) -> PanAccount:
+def owned_drive(
+    session: Session, user: User, account_id: int, *, allow_expired: bool = False
+) -> PanAccount:
     account = get_for_user(session, user.id, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -89,11 +108,15 @@ def owned_drive(session: Session, user: User, account_id: int, *, allow_expired:
     return account
 
 
-def remember_cookie(session: Session, account: PanAccount, cookie: str, warmed: str) -> None:
+def remember_cookie(
+    session: Session, account: PanAccount, cookie: str, warmed: str
+) -> None:
     if warmed == cookie and account.status == "valid":
         return
     if warmed != cookie:
-        account.cookie_ciphertext = encrypt_cookie(warmed, get_settings().cookie_fernet_key)
+        account.cookie_ciphertext = encrypt_cookie(
+            warmed, get_settings().cookie_fernet_key
+        )
     account.status = "valid"
     account.updated_at = now_utc()
     session.commit()
@@ -179,7 +202,9 @@ def folder_path(directory: str, name: str) -> str:
     return f"{directory}/{cleaned}"
 
 
-@router.post("/api/accounts/{account_id}/folders", response_model=DirEntryOut, status_code=201)
+@router.post(
+    "/api/accounts/{account_id}/folders", response_model=DirEntryOut, status_code=201
+)
 def create_folder(
     account_id: int,
     body: CreateFolderIn,
@@ -281,6 +306,114 @@ def rename_file(
     return OkOut()
 
 
+@router.post("/api/files/linked-rename", response_model=LinkedRenameOut)
+def linked_rename_file(
+    body: LinkedRenameIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    path = require_child_path(body.path)
+    new_name = clean_name(body.name)
+    current_name = clean_name(body.current_name)
+    members = list_members(session, user.id)
+    primary = primary_member(members)
+    if primary is None:
+        raise HTTPException(
+            status_code=422, detail="请先在系统配置中设置关联重命名主目录"
+        )
+    if body.account_id != primary.account_id:
+        raise HTTPException(status_code=422, detail="只能从主网盘目录发起关联重命名")
+
+    adapters: dict[int, tuple] = {}
+    session_lock = threading.Lock()
+
+    def ensure(account_id: int):
+        cached = adapters.get(account_id)
+        if cached is not None:
+            return cached
+        with session_lock:
+            cached = adapters.get(account_id)
+            if cached is not None:
+                return cached
+            account = owned_drive(session, user, account_id, allow_expired=True)
+            pair = open_adapter(session, account, request)
+            adapters[account_id] = (account, pair[0], pair[1])
+            return adapters[account_id]
+
+    def list_folders(account_id: int, directory: str) -> list[tuple[str, str]]:
+        account, adapter, cookie = ensure(account_id)
+        try:
+            entries = adapter.list_dir(cookie, directory)
+            with session_lock:
+                persist_warmed(session, account, cookie, adapter)
+        except LoginRejected as exc:
+            with session_lock:
+                account.status = "expired"
+                account.updated_at = now_utc()
+                session.commit()
+            raise RuntimeError(relogin(account.provider)) from exc
+        except PathNotFound as exc:
+            raise RuntimeError("目录不存在") from exc
+        return [(entry.path, entry.name) for entry in entries if entry.is_dir]
+
+    def rename(account_id: int, file_path: str, name: str) -> None:
+        account, adapter, cookie = ensure(account_id)
+        try:
+            adapter.rename(cookie, file_path, name)
+            with session_lock:
+                persist_warmed(session, account, cookie, adapter)
+        except DuplicateName as exc:
+            raise RuntimeError("已有同名文件") from exc
+        except PathNotFound as exc:
+            raise RuntimeError("文件不存在") from exc
+        except LoginRejected as exc:
+            with session_lock:
+                account.status = "expired"
+                account.updated_at = now_utc()
+                session.commit()
+            raise RuntimeError(relogin(account.provider)) from exc
+        except TransferFailed as exc:
+            raise RuntimeError("重命名失败") from exc
+
+    # Warm adapters on the request thread before peer work fans out.
+    for member in members:
+        ensure(member.account_id)
+
+    # Ensure source is under primary directory listing
+    try:
+        primary_folders = list_folders(primary.account_id, primary.directory)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if path not in {item[0] for item in primary_folders}:
+        raise HTTPException(
+            status_code=422, detail="请在主目录下选择要关联重命名的文件夹"
+        )
+
+    try:
+        result = linked_rename(
+            session,
+            user.id,
+            account_id=body.account_id,
+            path=path,
+            current_name=current_name,
+            new_name=new_name,
+            list_folders=list_folders,
+            rename=rename,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    session.commit()
+    return LinkedRenameOut(
+        renamed=result.renamed,
+        skipped=result.skipped,
+        failed=result.failed,
+        errors=result.errors,
+    )
+
+
 @router.post("/api/accounts/{account_id}/files/delete", response_model=OkOut)
 def delete_file(
     account_id: int,
@@ -294,6 +427,32 @@ def delete_file(
     adapter, cookie = open_adapter(session, account, request)
     try:
         adapter.delete(cookie, path)
+        persist_warmed(session, account, cookie, adapter)
+    except PathNotFound as exc:
+        raise HTTPException(status_code=422, detail="文件不存在") from exc
+    except LoginRejected as exc:
+        account.status = "expired"
+        account.updated_at = now_utc()
+        session.commit()
+        raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
+    except TransferFailed as exc:
+        raise HTTPException(status_code=422, detail="删除失败") from exc
+    return OkOut()
+
+
+@router.post("/api/accounts/{account_id}/files/delete-batch", response_model=OkOut)
+def delete_files(
+    account_id: int,
+    body: FilePathsIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    account = owned_drive(session, user, account_id, allow_expired=True)
+    paths = [require_child_path(path) for path in body.paths]
+    adapter, cookie = open_adapter(session, account, request)
+    try:
+        adapter.delete_many(cookie, paths)
         persist_warmed(session, account, cookie, adapter)
     except PathNotFound as exc:
         raise HTTPException(status_code=422, detail="文件不存在") from exc
@@ -328,7 +487,9 @@ def copy_files(
     for dest in targets:
         if expired:
             results.append(
-                CopyTargetResultOut(path=dest, name=name, ok=False, error=relogin(account.provider))
+                CopyTargetResultOut(
+                    path=dest, name=name, ok=False, error=relogin(account.provider)
+                )
             )
             continue
         placed = None
@@ -357,7 +518,9 @@ def copy_files(
         if placed is None and error is None:
             error = "已有同名文件"
         results.append(
-            CopyTargetResultOut(path=dest, name=placed or name, ok=placed is not None, error=error)
+            CopyTargetResultOut(
+                path=dest, name=placed or name, ok=placed is not None, error=error
+            )
         )
     persist_warmed(session, account, cookie, adapter)
     return CopyOut(
@@ -376,10 +539,18 @@ def share_file(
     session: Session = Depends(get_db),
 ):
     account = owned_drive(session, user, account_id, allow_expired=True)
-    password = "" if account.provider == "quark" else "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(4))
+    password = (
+        ""
+        if account.provider == "quark"
+        else "".join(
+            secrets.choice(string.ascii_letters + string.digits) for _ in range(4)
+        )
+    )
     adapter, cookie = open_adapter(session, account, request)
     try:
-        created = adapter.create_share(cookie, body.fs_id, password, path=body.path, name=body.name)
+        created = adapter.create_share(
+            cookie, body.fs_id, password, path=body.path, name=body.name
+        )
         if isinstance(created, tuple):
             url, password = created
         else:
@@ -415,7 +586,9 @@ def download_file(
         stream = adapter.open_download(cookie, target)
         persist_warmed(session, account, cookie, adapter)
     except NotAFile as exc:
-        raise HTTPException(status_code=422, detail="文件夹请进入后下载其中的文件") from exc
+        raise HTTPException(
+            status_code=422, detail="文件夹请进入后下载其中的文件"
+        ) from exc
     except PathNotFound as exc:
         raise HTTPException(status_code=422, detail="文件不存在") from exc
     except LoginRejected as exc:
@@ -424,27 +597,44 @@ def download_file(
         session.commit()
         raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
     except TransferFailed as exc:
-        raise HTTPException(status_code=422, detail="下载失败") from exc
+        detail = str(exc).strip() if str(exc).strip() else "下载失败"
+        raise HTTPException(status_code=422, detail=detail) from exc
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
     size = getattr(stream, "size", None)
     if isinstance(size, int):
         headers["Content-Length"] = str(size)
-    return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
+    return StreamingResponse(
+        stream, media_type="application/octet-stream", headers=headers
+    )
 
 
 def safe_attachment_name(requested: str | None, fallback: str) -> str:
-    cleaned = (requested or "").replace("\\", "／").replace("/", "／").replace("\x00", "").strip()
+    cleaned = (
+        (requested or "")
+        .replace("\\", "／")
+        .replace("/", "／")
+        .replace("\x00", "")
+        .strip()
+    )
     if not cleaned or cleaned in {".", ".."} or ".." in cleaned.split("／"):
         cleaned = fallback
     return quote(cleaned[:180])
 
 
-def folder_download(adapter: BaiduAdapter, cookie: str, target: str, session: Session, account: PanAccount) -> StreamingResponse:
+def folder_download(
+    adapter: BaiduAdapter,
+    cookie: str,
+    target: str,
+    session: Session,
+    account: PanAccount,
+) -> StreamingResponse:
     try:
         planned = archive_entries(adapter, cookie, target)
         persist_warmed(session, account, cookie, adapter)
     except FolderTooLarge as exc:
-        raise HTTPException(status_code=422, detail="目录里的文件太多，请进入下一级再下载") from exc
+        raise HTTPException(
+            status_code=422, detail="目录里的文件太多，请进入下一级再下载"
+        ) from exc
     except PathNotFound as exc:
         raise HTTPException(status_code=422, detail="目标目录不存在") from exc
     except LoginRejected as exc:
@@ -485,7 +675,11 @@ def to_download(task: DownloadTask) -> DownloadTaskOut:
     )
 
 
-@router.post("/api/accounts/{account_id}/files/save", response_model=DownloadTaskOut, status_code=201)
+@router.post(
+    "/api/accounts/{account_id}/files/save",
+    response_model=DownloadTaskOut,
+    status_code=201,
+)
 def save_directory(
     account_id: int,
     body: FilePathIn,
@@ -509,13 +703,19 @@ def save_directory(
 
 
 @router.get("/api/downloads", response_model=list[DownloadTaskOut])
-def list_downloads(user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+def list_downloads(
+    user: User = Depends(get_current_user), session: Session = Depends(get_db)
+):
     rows = list_user_downloads(session, user.id)
     return [to_download(row) for row in rows]
 
 
 @router.post("/api/downloads/{task_id}/cancel", response_model=DownloadTaskOut)
-def cancel_download(task_id: int, user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+def cancel_download(
+    task_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
     task = get_download(session, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(status_code=404, detail="下载任务不存在")
@@ -526,7 +726,11 @@ def to_upload(task: UploadTask) -> UploadTaskOut:
     return UploadTaskOut.model_validate(task)
 
 
-@router.post("/api/accounts/{account_id}/files/upload", response_model=UploadTaskOut, status_code=201)
+@router.post(
+    "/api/accounts/{account_id}/files/upload",
+    response_model=UploadTaskOut,
+    status_code=201,
+)
 async def upload_files(
     account_id: int,
     request: Request,
@@ -551,7 +755,11 @@ async def upload_files(
     total = 0
     try:
         for index, upload in enumerate(files):
-            relative = (paths[index] if index < len(paths) else None) or upload.filename or f"file-{index}"
+            relative = (
+                (paths[index] if index < len(paths) else None)
+                or upload.filename
+                or f"file-{index}"
+            )
             relative = relative.replace("\\", "/").lstrip("/")
             if not relative or ".." in relative.split("/"):
                 raise HTTPException(status_code=422, detail="文件路径无效")
@@ -602,12 +810,18 @@ async def upload_files(
 
 
 @router.get("/api/uploads", response_model=list[UploadTaskOut])
-def list_uploads(user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+def list_uploads(
+    user: User = Depends(get_current_user), session: Session = Depends(get_db)
+):
     return [to_upload(row) for row in list_user_uploads(session, user.id)]
 
 
 @router.post("/api/uploads/{task_id}/cancel", response_model=UploadTaskOut)
-def cancel_upload_route(task_id: int, user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+def cancel_upload_route(
+    task_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
     task = get_upload(session, task_id)
     if task is None or task.user_id != user.id:
         raise HTTPException(status_code=404, detail="上传任务不存在")
@@ -632,7 +846,9 @@ def create_transfer(
         raise HTTPException(status_code=422, detail="请粘贴分享链接")
     moment = body.now or now_utc()
     if directory != "/":
-        cookie = decrypt_cookie(account.cookie_ciphertext, get_settings().cookie_fernet_key)
+        cookie = decrypt_cookie(
+            account.cookie_ciphertext, get_settings().cookie_fernet_key
+        )
         adapter = adapter_for(account.provider, pan_client(request))
         try:
             adapter.list_dir(cookie, directory)
@@ -641,7 +857,9 @@ def create_transfer(
             account.status = "expired"
             account.updated_at = moment
             session.commit()
-            raise HTTPException(status_code=422, detail=relogin(account.provider)) from exc
+            raise HTTPException(
+                status_code=422, detail=relogin(account.provider)
+            ) from exc
         except PathNotFound as exc:
             raise HTTPException(status_code=422, detail="目标目录不存在") from exc
     try:
@@ -666,7 +884,11 @@ def create_transfer(
         if parsed is None:
             status, error = "failed", "链接无法解析"
         elif parsed.provider != account.provider:
-            names = {"baidu": "请使用百度账号", "quark": "请使用夸克账号", "xunlei": "请使用迅雷账号"}
+            names = {
+                "baidu": "请使用百度账号",
+                "quark": "请使用夸克账号",
+                "xunlei": "请使用迅雷账号",
+            }
             status, error = "failed", names.get(parsed.provider, "链接无法解析")
         else:
             status, error = "pending", None
@@ -686,7 +908,9 @@ def create_transfer(
 
 
 @router.get("/api/jobs", response_model=list[JobSummaryOut])
-def list_jobs(user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+def list_jobs(
+    user: User = Depends(get_current_user), session: Session = Depends(get_db)
+):
     return [
         JobSummaryOut(
             id=job.id,
@@ -704,7 +928,11 @@ def list_jobs(user: User = Depends(get_current_user), session: Session = Depends
 
 
 @router.get("/api/jobs/{job_id}", response_model=JobOut)
-def get_job(job_id: int, user: User = Depends(get_current_user), session: Session = Depends(get_db)):
+def get_job(
+    job_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
     job = get_job_for_user(session, user.id, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在")

@@ -192,6 +192,71 @@ def test_library_requires_login(client):
     assert client.get("/api/library").status_code == 401
 
 
+def test_library_export_xlsx(client):
+    import io
+
+    from openpyxl import load_workbook
+
+    register(client)
+    created = client.post("/api/library", json={
+        "prefix": "001",
+        "name": "001 回乡#42#完结",
+        "finished": True,
+        "latest_episode": 42,
+        "baidu_url": "https://pan.baidu.com/s/1bd001",
+        "xunlei_url": "https://pan.xunlei.com/s/xl001?pwd=ab12#",
+        "quark_url": "https://pan.quark.cn/s/qk001",
+    })
+    assert created.status_code == 201
+    client.post("/api/library", json={
+        "prefix": "002",
+        "name": "未完结",
+        "finished": False,
+        "latest_episode": None,
+        "baidu_url": "https://pan.baidu.com/s/1bd002",
+        "xunlei_url": "",
+        "quark_url": "",
+    })
+    exported = client.get("/api/library/export")
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    sheet = load_workbook(io.BytesIO(exported.content)).active
+    assert [cell.value for cell in sheet[1]] == [
+        "名称",
+        "最新一集",
+        "是否完结",
+        "百度网盘链接",
+        "迅雷网盘链接",
+        "夸克网盘链接",
+    ]
+    assert [cell.value for cell in sheet[2]] == [
+        "回乡",
+        42,
+        "是",
+        "https://pan.baidu.com/s/1bd001",
+        "https://pan.xunlei.com/s/xl001?pwd=ab12#",
+        "https://pan.quark.cn/s/qk001",
+    ]
+    assert [cell.value for cell in sheet[3]] == [
+        "未完结",
+        None,
+        "否",
+        "https://pan.baidu.com/s/1bd002",
+        None,
+        None,
+    ]
+    assert client.get("/api/library/export").status_code == 200
+    other = client.post("/api/auth/register", json={"email": "library-export-other@example.com", "password": "password-123"})
+    assert other.status_code == 201
+    empty = client.get("/api/library/export")
+    assert empty.status_code == 200
+    empty_sheet = load_workbook(io.BytesIO(empty.content)).active
+    assert [cell.value for cell in empty_sheet[1]][0] == "名称"
+    assert empty_sheet["A2"].value is None
+
+
 def test_library_rows_belong_to_the_registered_user(client):
     register(client)
     client.post("/api/library/import", json={"rows": [

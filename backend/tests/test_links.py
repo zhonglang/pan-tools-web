@@ -1,4 +1,4 @@
-from app.services.links import canonical_input, parse_share_link, share_chunks, split_link_lines
+from app.services.links import canonical_input, parse_share_link, share_chunks, split_link_lines, with_share_password
 
 
 def test_three_link_forms():
@@ -10,6 +10,16 @@ def test_three_link_forms():
     assert (labeled.surl, labeled.password) == ("AbCdEf", "cd34")
     assert (spaced.surl, spaced.password) == ("AbCdEf", "gh56")
     assert (plain.surl, plain.password) == ("AbCdEf", None)
+
+
+def test_with_share_password_appends_query():
+    assert with_share_password("https://pan.baidu.com/s/1AbCdEf", "ab12") == (
+        "https://pan.baidu.com/s/1AbCdEf?pwd=ab12"
+    )
+    assert with_share_password("https://pan.baidu.com/s/1AbCdEf?pwd=ab12", "zz99") == (
+        "https://pan.baidu.com/s/1AbCdEf?pwd=ab12"
+    )
+    assert with_share_password("https://pan.baidu.com/s/1AbCdEf", None) == "https://pan.baidu.com/s/1AbCdEf"
 
 
 def test_unparseable_link_is_none():

@@ -12,7 +12,15 @@ from app.core.crypto import decrypt_cookie, encrypt_cookie
 from app.core.deps import get_current_user, get_db, now_utc
 from app.crud.accounts import add as add_account
 from app.crud.accounts import count_valid, get_for_user, list_for_user
-from app.models import DownloadTask, Job, PanAccount, ShareLink, ShareStatSnapshot, UploadTask, User
+from app.models import (
+    DownloadTask,
+    Job,
+    PanAccount,
+    ShareLink,
+    ShareStatSnapshot,
+    UploadTask,
+    User,
+)
 from app.services.baidu_login_sessions import LoginSessionStore
 from app.services.membership import account_limit
 from app.pans import LoginRejected, ProviderClosed, adapter_for
@@ -23,7 +31,13 @@ from app.pans.quark_login import start_qr as start_quark_qr
 from app.pans.xunlei_login import QrLoginFailed as XunleiQrLoginFailed
 from app.pans.xunlei_login import poll_qr as poll_xunlei_qr
 from app.pans.xunlei_login import start_qr as start_xunlei_qr
-from app.schemas import AccountBindIn, AccountCookieIn, AccountOut, BaiduLoginOut, BaiduLoginStartIn
+from app.schemas import (
+    AccountBindIn,
+    AccountCookieIn,
+    AccountOut,
+    BaiduLoginOut,
+    BaiduLoginStartIn,
+)
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -66,7 +80,9 @@ def owned_account(session: Session, user: User, account_id: int) -> PanAccount:
     return account
 
 
-def to_account_out(account: PanAccount, last_synced_at: datetime | None = None) -> AccountOut:
+def to_account_out(
+    account: PanAccount, last_synced_at: datetime | None = None
+) -> AccountOut:
     return AccountOut(
         id=account.id,
         provider=account.provider,
@@ -82,11 +98,13 @@ def _last_sync_map(session: Session, account_ids: list[int]) -> dict[int, dateti
     if not account_ids:
         return {}
     rows = session.execute(
-        select(Job.account_id, func.max(Job.updated_at)).where(
+        select(Job.account_id, func.max(Job.updated_at))
+        .where(
             Job.account_id.in_(account_ids),
             Job.type == "sync",
             Job.status == "succeeded",
-        ).group_by(Job.account_id)
+        )
+        .group_by(Job.account_id)
     ).all()
     return {account_id: moment for account_id, moment in rows if account_id is not None}
 
@@ -102,7 +120,9 @@ def xunlei_subject(cookie: str) -> str | None:
     return subject if isinstance(subject, str) and subject else None
 
 
-def same_xunlei_account(session: Session, user: User, cookie: str, key: str) -> PanAccount | None:
+def same_xunlei_account(
+    session: Session, user: User, cookie: str, key: str
+) -> PanAccount | None:
     subject = xunlei_subject(cookie)
     if subject is None:
         return None
@@ -123,13 +143,19 @@ def same_xunlei_account(session: Session, user: User, cookie: str, key: str) -> 
 
 def _has_account_history(session: Session, account_id: int) -> bool:
     for model in (Job, ShareLink, ShareStatSnapshot, DownloadTask, UploadTask):
-        count = session.scalar(select(func.count()).select_from(model).where(model.account_id == account_id))
+        count = session.scalar(
+            select(func.count())
+            .select_from(model)
+            .where(model.account_id == account_id)
+        )
         if count:
             return True
     return False
 
 
-def drop_empty_same_xunlei(session: Session, user: User, cookie: str, key: str, keep_id: int) -> None:
+def drop_empty_same_xunlei(
+    session: Session, user: User, cookie: str, key: str, keep_id: int
+) -> None:
     subject = xunlei_subject(cookie)
     if subject is None:
         return
@@ -140,13 +166,25 @@ def drop_empty_same_xunlei(session: Session, user: User, cookie: str, key: str, 
             stored = decrypt_cookie(account.cookie_ciphertext, key)
         except RuntimeError:
             continue
-        if xunlei_subject(stored) != subject or _has_account_history(session, account.id):
+        if xunlei_subject(stored) != subject or _has_account_history(
+            session, account.id
+        ):
             continue
         session.delete(account)
 
 
-def ensure_slot(session: Session, user: User, now: datetime, provider: str, account: PanAccount | None) -> None:
-    if account is not None and account.provider == provider and account.status == "valid":
+def ensure_slot(
+    session: Session,
+    user: User,
+    now: datetime,
+    provider: str,
+    account: PanAccount | None,
+) -> None:
+    if (
+        account is not None
+        and account.provider == provider
+        and account.status == "valid"
+    ):
         return
     limit = account_limit(user, now)
     if limit is None:
@@ -154,7 +192,9 @@ def ensure_slot(session: Session, user: User, now: datetime, provider: str, acco
     if count_valid(session, user.id, provider) >= limit:
         name = {"baidu": "百度", "quark": "夸克"}.get(provider, "迅雷")
         if limit == 1:
-            raise HTTPException(status_code=422, detail=f"免费用户只能绑定 1 个{name}账号")
+            raise HTTPException(
+                status_code=422, detail=f"免费用户只能绑定 1 个{name}账号"
+            )
         raise HTTPException(status_code=422, detail=f"最多绑定 5 个{name}账号")
 
 
@@ -225,7 +265,9 @@ def start_baidu_login(
         with pan_client(request) as client:
             started = start_qr(client)
     except QrLoginFailed as exc:
-        raise HTTPException(status_code=502, detail="暂时无法打开百度登录，请稍后再试") from exc
+        raise HTTPException(
+            status_code=502, detail="暂时无法打开百度登录，请稍后再试"
+        ) from exc
     item = get_login_store(request).create(
         user_id=user.id,
         account_id=body.account_id,
@@ -266,13 +308,17 @@ def baidu_login_status(
             polled = poll_qr(client, item.sign, item.gid)
             if polled.state == "ready" and polled.cookie:
                 nickname = verified_nickname("baidu", polled.cookie, client)
-                store.mark(item.id, user.id, "ready", cookie=polled.cookie, nickname=nickname)
+                store.mark(
+                    item.id, user.id, "ready", cookie=polled.cookie, nickname=nickname
+                )
             elif polled.state == "scanned":
                 store.mark(item.id, user.id, "scanned")
     except HTTPException:
         raise
     except QrLoginFailed as exc:
-        raise HTTPException(status_code=502, detail="百度登录没有完成，请重新扫码") from exc
+        raise HTTPException(
+            status_code=502, detail="百度登录没有完成，请重新扫码"
+        ) from exc
     current = store.get(session_id, user.id)
     if current is None:
         raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
@@ -312,7 +358,9 @@ def confirm_baidu_login(
             user_id=user.id,
             provider="baidu",
             nickname=item.nickname,
-            cookie_ciphertext=encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key),
+            cookie_ciphertext=encrypt_cookie(
+                item.cookie, request.app.state.settings.cookie_fernet_key
+            ),
             status="valid",
             created_at=now,
             updated_at=now,
@@ -320,7 +368,9 @@ def confirm_baidu_login(
         account = add_account(session, account)
     else:
         account.nickname = item.nickname
-        account.cookie_ciphertext = encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key)
+        account.cookie_ciphertext = encrypt_cookie(
+            item.cookie, request.app.state.settings.cookie_fernet_key
+        )
         account.status = "valid"
         account.updated_at = now
     session.commit()
@@ -329,7 +379,9 @@ def confirm_baidu_login(
     return to_account_out(account)
 
 
-def owned_provider(session: Session, user: User, account_id: int, provider: str) -> PanAccount:
+def owned_provider(
+    session: Session, user: User, account_id: int, provider: str
+) -> PanAccount:
     account = get_for_user(session, user.id, account_id)
     if account is None or account.provider != provider:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -352,7 +404,9 @@ def start_quark_login(
         with pan_client(request) as client:
             started = start_quark_qr(client)
     except QuarkQrLoginFailed as exc:
-        raise HTTPException(status_code=502, detail="暂时无法打开夸克登录，请稍后再试") from exc
+        raise HTTPException(
+            status_code=502, detail="暂时无法打开夸克登录，请稍后再试"
+        ) from exc
     item = get_login_store(request).create(
         user_id=user.id,
         account_id=body.account_id,
@@ -365,7 +419,9 @@ def start_quark_login(
 
 
 @router.get("/quark/login/{session_id}/qrcode")
-def quark_login_qrcode(session_id: str, request: Request, user: User = Depends(get_current_user)) -> Response:
+def quark_login_qrcode(
+    session_id: str, request: Request, user: User = Depends(get_current_user)
+) -> Response:
     item = get_login_store(request).get(session_id, user.id)
     if item is None or item.status == "expired":
         raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
@@ -373,7 +429,9 @@ def quark_login_qrcode(session_id: str, request: Request, user: User = Depends(g
 
 
 @router.get("/quark/login/{session_id}")
-def quark_login_status(session_id: str, request: Request, user: User = Depends(get_current_user)) -> BaiduLoginOut:
+def quark_login_status(
+    session_id: str, request: Request, user: User = Depends(get_current_user)
+) -> BaiduLoginOut:
     store = get_login_store(request)
     item = store.get(session_id, user.id)
     if item is None:
@@ -385,7 +443,13 @@ def quark_login_status(session_id: str, request: Request, user: User = Depends(g
             polled = poll_quark_qr(client, item.sign, item.gid)
             if polled.state == "ready" and polled.cookie:
                 checked = verified_nickname("quark", polled.cookie, client)
-                store.mark(item.id, user.id, "ready", cookie=polled.cookie, nickname=polled.nickname or checked)
+                store.mark(
+                    item.id,
+                    user.id,
+                    "ready",
+                    cookie=polled.cookie,
+                    nickname=polled.nickname or checked,
+                )
             elif polled.state == "scanned":
                 store.mark(item.id, user.id, "scanned")
             elif polled.state == "expired":
@@ -393,7 +457,9 @@ def quark_login_status(session_id: str, request: Request, user: User = Depends(g
     except HTTPException:
         raise
     except QuarkQrLoginFailed as exc:
-        raise HTTPException(status_code=502, detail="暂时无法打开夸克登录，请稍后再试") from exc
+        raise HTTPException(
+            status_code=502, detail="暂时无法打开夸克登录，请稍后再试"
+        ) from exc
     current = store.get(session_id, user.id)
     if current is None:
         raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
@@ -401,7 +467,9 @@ def quark_login_status(session_id: str, request: Request, user: User = Depends(g
 
 
 @router.delete("/quark/login/{session_id}")
-def cancel_quark_login(session_id: str, request: Request, user: User = Depends(get_current_user)) -> dict:
+def cancel_quark_login(
+    session_id: str, request: Request, user: User = Depends(get_current_user)
+) -> dict:
     get_login_store(request).discard(session_id, user.id)
     return {"ok": True}
 
@@ -429,7 +497,9 @@ def confirm_quark_login(
             user_id=user.id,
             provider="quark",
             nickname=item.nickname,
-            cookie_ciphertext=encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key),
+            cookie_ciphertext=encrypt_cookie(
+                item.cookie, request.app.state.settings.cookie_fernet_key
+            ),
             status="valid",
             created_at=now,
             updated_at=now,
@@ -437,7 +507,9 @@ def confirm_quark_login(
         account = add_account(session, account)
     else:
         account.nickname = item.nickname
-        account.cookie_ciphertext = encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key)
+        account.cookie_ciphertext = encrypt_cookie(
+            item.cookie, request.app.state.settings.cookie_fernet_key
+        )
         account.status = "valid"
         account.updated_at = now
     session.commit()
@@ -462,7 +534,9 @@ def start_xunlei_login(
         with pan_client(request) as client:
             started = start_xunlei_qr(client)
     except XunleiQrLoginFailed as exc:
-        raise HTTPException(status_code=502, detail="暂时无法打开迅雷登录，请稍后再试") from exc
+        raise HTTPException(
+            status_code=502, detail="暂时无法打开迅雷登录，请稍后再试"
+        ) from exc
     item = get_login_store(request).create(
         user_id=user.id,
         account_id=body.account_id,
@@ -475,7 +549,9 @@ def start_xunlei_login(
 
 
 @router.get("/xunlei/login/{session_id}/qrcode")
-def xunlei_login_qrcode(session_id: str, request: Request, user: User = Depends(get_current_user)) -> Response:
+def xunlei_login_qrcode(
+    session_id: str, request: Request, user: User = Depends(get_current_user)
+) -> Response:
     item = get_login_store(request).get(session_id, user.id)
     if item is None or item.status == "expired":
         raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
@@ -483,7 +559,9 @@ def xunlei_login_qrcode(session_id: str, request: Request, user: User = Depends(
 
 
 @router.get("/xunlei/login/{session_id}")
-def xunlei_login_status(session_id: str, request: Request, user: User = Depends(get_current_user)) -> BaiduLoginOut:
+def xunlei_login_status(
+    session_id: str, request: Request, user: User = Depends(get_current_user)
+) -> BaiduLoginOut:
     store = get_login_store(request)
     item = store.get(session_id, user.id)
     if item is None:
@@ -495,7 +573,13 @@ def xunlei_login_status(session_id: str, request: Request, user: User = Depends(
             polled = poll_xunlei_qr(client, item.sign, item.gid)
             if polled.state == "ready" and polled.cookie:
                 checked = verified_nickname("xunlei", polled.cookie, client)
-                store.mark(item.id, user.id, "ready", cookie=polled.cookie, nickname=polled.nickname or checked)
+                store.mark(
+                    item.id,
+                    user.id,
+                    "ready",
+                    cookie=polled.cookie,
+                    nickname=polled.nickname or checked,
+                )
             elif polled.state == "scanned":
                 store.mark(item.id, user.id, "scanned")
             elif polled.state == "expired":
@@ -503,7 +587,9 @@ def xunlei_login_status(session_id: str, request: Request, user: User = Depends(
     except HTTPException:
         raise
     except XunleiQrLoginFailed as exc:
-        raise HTTPException(status_code=502, detail="暂时无法打开迅雷登录，请稍后再试") from exc
+        raise HTTPException(
+            status_code=502, detail="暂时无法打开迅雷登录，请稍后再试"
+        ) from exc
     current = store.get(session_id, user.id)
     if current is None:
         raise HTTPException(status_code=404, detail="登录已过期，请重新发起")
@@ -511,7 +597,9 @@ def xunlei_login_status(session_id: str, request: Request, user: User = Depends(
 
 
 @router.delete("/xunlei/login/{session_id}")
-def cancel_xunlei_login(session_id: str, request: Request, user: User = Depends(get_current_user)) -> dict:
+def cancel_xunlei_login(
+    session_id: str, request: Request, user: User = Depends(get_current_user)
+) -> dict:
     get_login_store(request).discard(session_id, user.id)
     return {"ok": True}
 
@@ -534,14 +622,18 @@ def confirm_xunlei_login(
     if item.account_id is not None:
         account = owned_provider(session, user, item.account_id, "xunlei")
     if account is None:
-        account = same_xunlei_account(session, user, item.cookie, request.app.state.settings.cookie_fernet_key)
+        account = same_xunlei_account(
+            session, user, item.cookie, request.app.state.settings.cookie_fernet_key
+        )
     ensure_slot(session, user, now, "xunlei", account)
     if account is None:
         account = PanAccount(
             user_id=user.id,
             provider="xunlei",
             nickname=item.nickname,
-            cookie_ciphertext=encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key),
+            cookie_ciphertext=encrypt_cookie(
+                item.cookie, request.app.state.settings.cookie_fernet_key
+            ),
             status="valid",
             created_at=now,
             updated_at=now,
@@ -549,10 +641,18 @@ def confirm_xunlei_login(
         account = add_account(session, account)
     else:
         account.nickname = item.nickname
-        account.cookie_ciphertext = encrypt_cookie(item.cookie, request.app.state.settings.cookie_fernet_key)
+        account.cookie_ciphertext = encrypt_cookie(
+            item.cookie, request.app.state.settings.cookie_fernet_key
+        )
         account.status = "valid"
         account.updated_at = now
-    drop_empty_same_xunlei(session, user, item.cookie, request.app.state.settings.cookie_fernet_key, account.id)
+    drop_empty_same_xunlei(
+        session,
+        user,
+        item.cookie,
+        request.app.state.settings.cookie_fernet_key,
+        account.id,
+    )
     session.commit()
     session.refresh(account)
     store.discard(session_id, user.id)

@@ -17,7 +17,9 @@ _account_locks: dict[int, threading.Lock] = {}
 
 
 def interrupt_upload_orphans(session: Session) -> None:
-    rows = session.scalars(select(UploadTask).where(UploadTask.status == "running")).all()
+    rows = session.scalars(
+        select(UploadTask).where(UploadTask.status == "running")
+    ).all()
     moment = datetime.now(timezone.utc)
     for row in rows:
         row.status = "failed"

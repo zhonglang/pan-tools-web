@@ -11,7 +11,9 @@ _PWD_QUERY = re.compile(r"[?&]pwd=([0-9A-Za-z]{4})")
 _PWD_LABEL = re.compile(r"提取码\s*[:：]\s*([0-9A-Za-z]{4})")
 _PWD_TAIL = re.compile(r"\s+([0-9A-Za-z]{4})\s*$")
 _CAPTION = re.compile(r"通过百度网盘分享|通过夸克网盘|我用夸克网盘|超级会员")
-_FOOTER = re.compile(r"复制这段内容|即可获取|点击链接或复制整段内容|提取码\s*[:：]\s*[0-9A-Za-z]{4}")
+_FOOTER = re.compile(
+    r"复制这段内容|即可获取|点击链接或复制整段内容|提取码\s*[:：]\s*[0-9A-Za-z]{4}"
+)
 _TITLE = re.compile(r"分享的文件\s*[:：]\s*(.+?)\s*$", re.MULTILINE)
 _QUARK_TITLE = re.compile(r"分享了「([^」]+)」")
 
@@ -30,7 +32,11 @@ def _password(text: str) -> str | None:
         if found is not None:
             return found.group(1)
     for line in text.splitlines():
-        if _SHARE.search(line) is None and _QUARK.search(line) is None and _XUNLEI.search(line) is None:
+        if (
+            _SHARE.search(line) is None
+            and _QUARK.search(line) is None
+            and _XUNLEI.search(line) is None
+        ):
             continue
         tail = _PWD_TAIL.search(line)
         if tail is not None:
@@ -86,7 +92,12 @@ def share_chunks(text: str) -> list[str]:
             continue
         before: list[str] = []
         cursor = index - 1
-        while cursor >= 0 and lines[cursor].strip() and cursor not in consumed and _URL.search(lines[cursor]) is None:
+        while (
+            cursor >= 0
+            and lines[cursor].strip()
+            and cursor not in consumed
+            and _URL.search(lines[cursor]) is None
+        ):
             if _CAPTION.search(lines[cursor]) is None:
                 break
             before.append(lines[cursor].strip())
@@ -95,7 +106,11 @@ def share_chunks(text: str) -> list[str]:
         before.reverse()
         after: list[str] = []
         cursor = index + 1
-        while cursor < len(lines) and lines[cursor].strip() and _URL.search(lines[cursor]) is None:
+        while (
+            cursor < len(lines)
+            and lines[cursor].strip()
+            and _URL.search(lines[cursor]) is None
+        ):
             if _FOOTER.search(lines[cursor]) is None:
                 break
             after.append(lines[cursor].strip())
@@ -128,6 +143,17 @@ def canonical_input(chunk: str) -> str:
     if parsed.password:
         url += f"?pwd={parsed.password}"
     return url
+
+
+def with_share_password(url: str, password: str | None) -> str:
+    cleaned = (url or "").strip()
+    code = (password or "").strip()
+    if not cleaned or not code:
+        return cleaned
+    if "pwd=" in cleaned:
+        return cleaned
+    joiner = "&" if "?" in cleaned else "?"
+    return f"{cleaned}{joiner}pwd={code}"
 
 
 def split_link_lines(text: str) -> list[str]:

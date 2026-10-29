@@ -8,18 +8,35 @@ from app.core.config import get_settings
 from app.core.crypto import decrypt_cookie
 from app.services.transfers import keep_warmed
 from app.services.membership import can_use_paid_features
-from app.models import AccountStatDay, Job, PanAccount, ShareLink, ShareStatSnapshot, User
+from app.models import (
+    AccountStatDay,
+    Job,
+    PanAccount,
+    ShareLink,
+    ShareStatSnapshot,
+    User,
+)
 from app.pans import adapter_for
 from app.pans.errors import LoginRejected, RateLimited, TransferFailed
+from app.services.links import with_share_password
 from app.services.transfers import EXPIRED, RETRY_DELAYS, publish
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 PAGE_SIZE = 10
 PAGE_SIZES = (10, 20, 50)
 DAILY_CLOSE = "daily-close"
+# 上海时间 [00:00, 00:02)：定时入队；此窗口内触发的同步（含手动）归属前一天
+PREVIOUS_DAY_WINDOW_END_MINUTE = 2
 
 
-def date_bounds(start_day: str, end_day: str, now: datetime) -> tuple[datetime, datetime]:
+def in_previous_day_window(now: datetime) -> bool:
+    local = _aware(now).astimezone(SHANGHAI)
+    return local.hour == 0 and local.minute < PREVIOUS_DAY_WINDOW_END_MINUTE
+
+
+def date_bounds(
+    start_day: str, end_day: str, now: datetime
+) -> tuple[datetime, datetime]:
     current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
     local_now = current.astimezone(SHANGHAI)
     try:
@@ -56,13 +73,17 @@ def range_bounds(span: str, now: datetime) -> tuple[datetime, datetime]:
 
 
 def enqueue_daily_syncs(session: Session, now: datetime) -> None:
-    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    local = current.astimezone(SHANGHAI)
-    if local.hour > 5 or (local.hour, local.minute) < (0, 5):
+    current = _aware(now)
+    if not in_previous_day_window(current):
         return
-    day_start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    local = current.astimezone(SHANGHAI)
+    day_start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc
+    )
     accounts = session.scalars(
-        select(PanAccount).where(PanAccount.provider == "baidu", PanAccount.status == "valid")
+        select(PanAccount).where(
+            PanAccount.provider == "baidu", PanAccount.status == "valid"
+        )
     ).all()
     for account in accounts:
         user = session.get(User, account.user_id)
@@ -138,17 +159,28 @@ def execute_sync(session: Session, client, job: Job, sleeper, now: datetime) -> 
         job.error = "同步失败"
         job.updated_at = now
         return
-    apply_share_records(session, account, records, now, snapshot_at=_snapshot_at(job, now))
+    apply_share_records(
+        session, account, records, now, snapshot_at=_snapshot_at(job, now)
+    )
     job.status = "succeeded"
     job.error = None
     job.updated_at = now
 
 
 def _snapshot_at(job: Job, now: datetime) -> datetime:
-    if job.directory != DAILY_CLOSE:
-        return now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    midnight = moment.astimezone(SHANGHAI).replace(hour=0, minute=0, second=0, microsecond=0)
+    moment = _aware(now)
+    created = _aware(job.created_at) if job.created_at is not None else None
+    if job.directory == DAILY_CLOSE:
+        ref = moment
+    elif created is not None and in_previous_day_window(created):
+        ref = created
+    elif in_previous_day_window(moment):
+        ref = moment
+    else:
+        return moment
+    midnight = ref.astimezone(SHANGHAI).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     return (midnight - timedelta(seconds=1)).astimezone(timezone.utc)
 
 
@@ -159,7 +191,9 @@ def apply_share_records(
     now: datetime,
     snapshot_at: datetime | None = None,
 ) -> None:
-    existing = session.scalars(select(ShareLink).where(ShareLink.account_id == account.id)).all()
+    existing = session.scalars(
+        select(ShareLink).where(ShareLink.account_id == account.id)
+    ).all()
     by_key: dict[str, ShareLink] = {}
     for row in existing:
         if row.baidu_share_id:
@@ -208,7 +242,9 @@ def apply_share_records(
             row.status = "removed"
     session.flush()
     active = session.scalars(
-        select(ShareLink).where(ShareLink.account_id == account.id, ShareLink.status == "active")
+        select(ShareLink).where(
+            ShareLink.account_id == account.id, ShareLink.status == "active"
+        )
     ).all()
     moment = snapshot_at or now
     _write_daily_snapshots(session, account, active, moment)
@@ -222,7 +258,9 @@ def _upsert_account_stat_day(
     stat_date = moment.astimezone(SHANGHAI).date()
 
     def _sum(field: str) -> int | None:
-        values = [getattr(row, field) for row in active if getattr(row, field) is not None]
+        values = [
+            getattr(row, field) for row in active if getattr(row, field) is not None
+        ]
         return sum(values) if values else None
 
     row = session.scalars(
@@ -241,9 +279,13 @@ def _upsert_account_stat_day(
     row.updated_at = moment
 
 
-def _write_daily_snapshots(session: Session, account: PanAccount, active: list[ShareLink], now: datetime) -> None:
+def _write_daily_snapshots(
+    session: Session, account: PanAccount, active: list[ShareLink], now: datetime
+) -> None:
     moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    local = moment.astimezone(SHANGHAI).replace(hour=0, minute=0, second=0, microsecond=0)
+    local = moment.astimezone(SHANGHAI).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     day_start = local.astimezone(timezone.utc)
     day_end = (local + timedelta(days=1)).astimezone(timezone.utc)
     today = session.scalars(
@@ -298,8 +340,22 @@ def query_stats(
     name_q = name.strip() if name and name.strip() else None
     mode = "range" if start is not None and end is not None else "history"
     if mode == "history":
-        return _query_history_stats(session, accounts, names, account_ids, page, size, offset, current, name_q)
-    return _query_range_stats(session, accounts, names, account_ids, page, size, offset, current, start, end, name_q)
+        return _query_history_stats(
+            session, accounts, names, account_ids, page, size, offset, current, name_q
+        )
+    return _query_range_stats(
+        session,
+        accounts,
+        names,
+        account_ids,
+        page,
+        size,
+        offset,
+        current,
+        start,
+        end,
+        name_q,
+    )
 
 
 def _query_history_stats(
@@ -317,20 +373,30 @@ def _query_history_stats(
         return _empty_stats("history", page, size, None, None)
     filters = (ShareLink.account_id.in_(account_ids), ShareLink.status == "active")
     total = session.scalar(select(func.count()).where(*filters)) or 0
-    transfers = session.scalar(select(func.sum(ShareLink.transfer_count)).where(*filters))
+    transfers = session.scalar(
+        select(func.sum(ShareLink.transfer_count)).where(*filters)
+    )
     views = session.scalar(select(func.sum(ShareLink.view_count)).where(*filters))
-    downloads = session.scalar(select(func.sum(ShareLink.download_count)).where(*filters))
-    table_filters = (*filters, ShareLink.name.ilike(f"%{name_q}%")) if name_q else filters
+    downloads = session.scalar(
+        select(func.sum(ShareLink.download_count)).where(*filters)
+    )
+    table_filters = (
+        (*filters, ShareLink.name.ilike(f"%{name_q}%")) if name_q else filters
+    )
     rank_total = session.scalar(select(func.count()).where(*table_filters)) or 0
     rows = session.scalars(
         select(ShareLink)
         .where(*table_filters)
-        .order_by(ShareLink.transfer_count.desc().nulls_last(), ShareLink.created_at.desc())
+        .order_by(
+            ShareLink.transfer_count.desc().nulls_last(), ShareLink.created_at.desc()
+        )
         .offset(offset)
         .limit(size)
     ).all()
     first = session.scalar(
-        select(func.min(ShareStatSnapshot.taken_at)).where(ShareStatSnapshot.account_id.in_(account_ids))
+        select(func.min(ShareStatSnapshot.taken_at)).where(
+            ShareStatSnapshot.account_id.in_(account_ids)
+        )
     )
     return {
         "total": total,
@@ -340,8 +406,14 @@ def _query_history_stats(
         "summary": {
             "new_shares": total,
             "views": {"value": int(views) if views is not None else None, "from": None},
-            "transfers": {"value": int(transfers) if transfers is not None else None, "from": None},
-            "downloads": {"value": int(downloads) if downloads is not None else None, "from": None},
+            "transfers": {
+                "value": int(transfers) if transfers is not None else None,
+                "from": None,
+            },
+            "downloads": {
+                "value": int(downloads) if downloads is not None else None,
+                "from": None,
+            },
         },
         "rank": "history",
         "page": page,
@@ -351,7 +423,7 @@ def _query_history_stats(
             {
                 "name": row.name,
                 "account_name": names.get(row.account_id, ""),
-                "url": row.url,
+                "url": with_share_password(row.url, row.password),
                 "created_at": row.created_at,
                 "views": row.view_count,
                 "transfers": row.transfer_count,
@@ -383,28 +455,41 @@ def _query_range_stats(
     start_day = _aware(start).astimezone(SHANGHAI).date()
     end_day = _aware(end).astimezone(SHANGHAI).date()
     # 总链接：不含开始日当天新建，只计 (start_day, end] 内创建的链接
-    after_start = datetime(start_day.year, start_day.month, start_day.day, tzinfo=SHANGHAI) + timedelta(days=1)
+    after_start = datetime(
+        start_day.year, start_day.month, start_day.day, tzinfo=SHANGHAI
+    ) + timedelta(days=1)
     link_from = after_start.astimezone(timezone.utc)
-    new_shares = session.scalar(
-        select(func.count()).where(
-            ShareLink.account_id.in_(account_ids),
-            ShareLink.status == "active",
-            ShareLink.created_at >= link_from,
-            ShareLink.created_at <= end,
+    new_shares = (
+        session.scalar(
+            select(func.count()).where(
+                ShareLink.account_id.in_(account_ids),
+                ShareLink.status == "active",
+                ShareLink.created_at >= link_from,
+                ShareLink.created_at <= end,
+            )
         )
-    ) or 0
+        or 0
+    )
     summary = {
         "new_shares": new_shares,
-        "views": _day_metric_delta(session, account_ids, start_day, end_day, "view_total"),
-        "transfers": _day_metric_delta(session, account_ids, start_day, end_day, "transfer_total"),
-        "downloads": _day_metric_delta(session, account_ids, start_day, end_day, "download_total"),
+        "views": _day_metric_delta(
+            session, account_ids, start_day, end_day, "view_total"
+        ),
+        "transfers": _day_metric_delta(
+            session, account_ids, start_day, end_day, "transfer_total"
+        ),
+        "downloads": _day_metric_delta(
+            session, account_ids, start_day, end_day, "download_total"
+        ),
     }
     series = _day_transfer_series(session, accounts, start_day, end_day)
     rank_total, rows = _range_rank_page(
         session, names, account_ids, start_day, end_day, end, offset, size, name_q
     )
     first = session.scalar(
-        select(func.min(ShareStatSnapshot.taken_at)).where(ShareStatSnapshot.account_id.in_(account_ids))
+        select(func.min(ShareStatSnapshot.taken_at)).where(
+            ShareStatSnapshot.account_id.in_(account_ids)
+        )
     )
     return {
         "total": new_shares,
@@ -442,15 +527,23 @@ def _empty_stats(rank: str, page: int, size: int, start, end) -> dict:
     }
 
 
-def _day_metric_delta(session: Session, account_ids: list[int], start_day, end_day, field: str) -> dict:
+def _day_metric_delta(
+    session: Session, account_ids: list[int], start_day, end_day, field: str
+) -> dict:
     """Sum end−start per account that has both day rows; skip accounts missing a day."""
     if not account_ids:
         return {"value": None, "from": None}
     start_rows = session.scalars(
-        select(AccountStatDay).where(AccountStatDay.account_id.in_(account_ids), AccountStatDay.stat_date == start_day)
+        select(AccountStatDay).where(
+            AccountStatDay.account_id.in_(account_ids),
+            AccountStatDay.stat_date == start_day,
+        )
     ).all()
     end_rows = session.scalars(
-        select(AccountStatDay).where(AccountStatDay.account_id.in_(account_ids), AccountStatDay.stat_date == end_day)
+        select(AccountStatDay).where(
+            AccountStatDay.account_id.in_(account_ids),
+            AccountStatDay.stat_date == end_day,
+        )
     ).all()
     start_by = {row.account_id: row for row in start_rows}
     end_by = {row.account_id: row for row in end_rows}
@@ -472,7 +565,9 @@ def _day_metric_delta(session: Session, account_ids: list[int], start_day, end_d
     return {"value": total, "from": None}
 
 
-def _day_transfer_series(session: Session, accounts: list[PanAccount], start_day, end_day) -> dict:
+def _day_transfer_series(
+    session: Session, accounts: list[PanAccount], start_day, end_day
+) -> dict:
     account_ids = [account.id for account in accounts]
     days = []
     cursor = start_day
@@ -492,7 +587,9 @@ def _day_transfer_series(session: Session, accounts: list[PanAccount], start_day
 
     def total_on(day) -> int | None:
         items = by_day.get(day) or []
-        values = [item.transfer_total for item in items if item.transfer_total is not None]
+        values = [
+            item.transfer_total for item in items if item.transfer_total is not None
+        ]
         if not values and not items:
             return None
         if not values:
@@ -514,13 +611,25 @@ def _day_transfer_series(session: Session, accounts: list[PanAccount], start_day
     return {
         "dates": [day.isoformat() for day in days],
         "lines": [
-            {"account_id": account_id, "account_name": label, "values": deltas, "kind": "delta"},
-            {"account_id": account_id, "account_name": label, "values": totals, "kind": "total"},
+            {
+                "account_id": account_id,
+                "account_name": label,
+                "values": deltas,
+                "kind": "delta",
+            },
+            {
+                "account_id": account_id,
+                "account_name": label,
+                "values": totals,
+                "kind": "total",
+            },
         ],
     }
 
 
-def _day_field_subquery(account_ids: list[int], day, field: str, upper: datetime | None = None):
+def _day_field_subquery(
+    account_ids: list[int], day, field: str, upper: datetime | None = None
+):
     """Last non-null field snapshot whose taken_at falls on the Shanghai calendar day."""
     column = getattr(ShareStatSnapshot, field)
     local_start = datetime(day.year, day.month, day.day, tzinfo=SHANGHAI)
@@ -541,14 +650,21 @@ def _day_field_subquery(account_ids: list[int], day, field: str, upper: datetime
             func.row_number()
             .over(
                 partition_by=ShareStatSnapshot.share_link_id,
-                order_by=(ShareStatSnapshot.taken_at.desc(), ShareStatSnapshot.id.desc()),
+                order_by=(
+                    ShareStatSnapshot.taken_at.desc(),
+                    ShareStatSnapshot.id.desc(),
+                ),
             )
             .label("rn"),
         )
         .where(*filters)
         .subquery()
     )
-    return select(ranked.c.share_link_id, ranked.c.value).where(ranked.c.rn == 1).subquery()
+    return (
+        select(ranked.c.share_link_id, ranked.c.value)
+        .where(ranked.c.rn == 1)
+        .subquery()
+    )
 
 
 def _range_rank_page(
@@ -567,7 +683,9 @@ def _range_rank_page(
         filters = (*filters, ShareLink.name.ilike(f"%{name_q}%"))
     rank_total = session.scalar(select(func.count()).where(*filters)) or 0
     # 周期内新建：与总链接一致，不含开始日当天，只计 (start_day, end]
-    after_start = datetime(start_day.year, start_day.month, start_day.day, tzinfo=SHANGHAI) + timedelta(days=1)
+    after_start = datetime(
+        start_day.year, start_day.month, start_day.day, tzinfo=SHANGHAI
+    ) + timedelta(days=1)
     link_from = after_start.astimezone(timezone.utc)
     end_at = _aware(end)
     before_t = _day_field_subquery(account_ids, start_day, "transfer_count")
@@ -624,7 +742,7 @@ def _range_rank_page(
             {
                 "name": share.name,
                 "account_name": names.get(share.account_id, ""),
-                "url": share.url,
+                "url": with_share_password(share.url, share.password),
                 "created_at": share.created_at,
                 "views": end_value(v1),
                 "transfers": end_value(t1),
@@ -653,9 +771,17 @@ def _record(item: dict, now: datetime) -> dict | None:
     given = item.get("url") if isinstance(item.get("url"), str) else ""
     url = given or (f"https://pan.baidu.com/s/{short}" if short else "")
     created = item.get("ctime")
-    created_at = datetime.fromtimestamp(created, timezone.utc) if isinstance(created, int) else now
+    created_at = (
+        datetime.fromtimestamp(created, timezone.utc)
+        if isinstance(created, int)
+        else now
+    )
     expired_time = item.get("expiredTime")
-    expired = isinstance(expired_time, int) and expired_time > 0 and expired_time <= int(now.timestamp())
+    expired = (
+        isinstance(expired_time, int)
+        and expired_time > 0
+        and expired_time <= int(now.timestamp())
+    )
     keys = {str(share_id)}
     if short:
         keys.add(short)

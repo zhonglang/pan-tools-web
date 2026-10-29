@@ -9,7 +9,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from app.pans.baidu import DirEntry, DownloadStream
+from app.pans.baidu import DirEntry, stream_ranged_download
 from app.pans.errors import (
     DuplicateName,
     InvalidLink,
@@ -34,6 +34,7 @@ USER_AGENT = (
     "netWorkType/WIFI appid/40 deviceName/pan-tools deviceModel/pan-tools "
     "OSVersion/13 protocolVersion/301 platformVersion/10 sdkVersion/512000"
 )
+DOWNLOAD_UA = "Dalvik/2.1.0 (Linux; U; Android 13; pan-tools Build/TQ3A.230805.001)"
 ALGORITHMS = (
     "9uJNVj/wLmdwKrJaVj/omlQ",
     "Oz64Lp0GigmChHMf/6TNfxx7O9PyopcczMsnf",
@@ -68,7 +69,9 @@ class XunleiAdapter:
     def verify_login(self, cookie: str) -> str:
         try:
             credential = self._live(self._creds(cookie), action="GET:/v1/user/me")
-            payload = self._send("GET", f"{AUTH}/user/me", credential, action="GET:/v1/user/me")
+            payload = self._send(
+                "GET", f"{AUTH}/user/me", credential, action="GET:/v1/user/me"
+            )
         except TransferFailed as exc:
             raise LoginRejected() from exc
         for key in ("name", "username", "nickname"):
@@ -101,7 +104,11 @@ class XunleiAdapter:
             for item in files:
                 if isinstance(item, dict):
                     entries.append(_entry(item))
-            page = payload.get("next_page_token") if isinstance(payload.get("next_page_token"), str) else ""
+            page = (
+                payload.get("next_page_token")
+                if isinstance(payload.get("next_page_token"), str)
+                else ""
+            )
             if not page:
                 return entries
         raise TransferFailed()
@@ -131,7 +138,14 @@ class XunleiAdapter:
         for name in relative.split("/"):
             if not name:
                 continue
-            match = next((entry for entry in self.list_dir(cookie, current) if entry.is_dir and entry.name == name), None)
+            match = next(
+                (
+                    entry
+                    for entry in self.list_dir(cookie, current)
+                    if entry.is_dir and entry.name == name
+                ),
+                None,
+            )
             if match is not None:
                 current = match.path
             else:
@@ -175,18 +189,35 @@ class XunleiAdapter:
             if on_progress:
                 on_progress(actual)
             return
-        resumable = payload.get("resumable") if isinstance(payload.get("resumable"), dict) else {}
-        params = resumable.get("params") if isinstance(resumable.get("params"), dict) else {}
+        resumable = (
+            payload.get("resumable")
+            if isinstance(payload.get("resumable"), dict)
+            else {}
+        )
+        params = (
+            resumable.get("params") if isinstance(resumable.get("params"), dict) else {}
+        )
         bucket = params.get("bucket")
         key = params.get("key")
         endpoint = params.get("endpoint")
         access_key = params.get("access_key_id")
         secret_key = params.get("access_key_secret")
         token = params.get("security_token")
-        if not all(isinstance(value, str) and value for value in (bucket, key, endpoint, access_key, secret_key, token)):
+        if not all(
+            isinstance(value, str) and value
+            for value in (bucket, key, endpoint, access_key, secret_key, token)
+        ):
             raise TransferFailed()
-        assert isinstance(bucket, str) and isinstance(key, str) and isinstance(endpoint, str)
-        assert isinstance(access_key, str) and isinstance(secret_key, str) and isinstance(token, str)
+        assert (
+            isinstance(bucket, str)
+            and isinstance(key, str)
+            and isinstance(endpoint, str)
+        )
+        assert (
+            isinstance(access_key, str)
+            and isinstance(secret_key, str)
+            and isinstance(token, str)
+        )
         if should_stop and should_stop():
             raise UploadCancelled()
         _s3_put_object(
@@ -204,11 +235,37 @@ class XunleiAdapter:
 
     def rename(self, cookie: str, path: str, new_name: str) -> None:
         credential = self._live(self._creds(cookie))
-        self._send("PATCH", f"{API}/files/{_fid(path)}", credential, body={"name": new_name})
+        self._send(
+            "PATCH", f"{API}/files/{_fid(path)}", credential, body={"name": new_name}
+        )
 
     def delete(self, cookie: str, path: str) -> None:
+        self.delete_many(cookie, [path])
+
+    def delete_many(
+        self,
+        cookie: str,
+        paths: list[str],
+        *,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        ids = [_fid(path) for path in paths if path]
+        if not ids:
+            return
+        wait = sleeper or time.sleep
         credential = self._live(self._creds(cookie))
-        self._send("PATCH", f"{API}/files/{_fid(path)}/trash", credential, body={})
+        payload = self._send(
+            "POST",
+            f"{API}/files:batchTrash",
+            credential,
+            body={"ids": ids},
+            action="POST:/drive/v1/files:batchTrash",
+        )
+        task_id = (
+            payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
+        )
+        if task_id:
+            self._wait_drive_task(cookie, task_id, wait)
 
     def copy(
         self,
@@ -232,7 +289,9 @@ class XunleiAdapter:
             body={"ids": [_fid(path)], "to": {"parent_id": _fid(dest)}},
             action="POST:/drive/v1/files:batchCopy",
         )
-        task_id = payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
+        task_id = (
+            payload.get("task_id") if isinstance(payload.get("task_id"), str) else None
+        )
         if task_id:
             self._wait_drive_task(cookie, task_id, wait)
         newcomers: list[DirEntry] = []
@@ -270,7 +329,11 @@ class XunleiAdapter:
         files = detail.get("files") or []
         if not isinstance(token, str) or not token or not isinstance(files, list):
             raise InvalidLink()
-        file_ids = [item.get("id") for item in files if isinstance(item, dict) and isinstance(item.get("id"), str)]
+        file_ids = [
+            item.get("id")
+            for item in files
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
         if not file_ids:
             raise InvalidLink()
         self._send(
@@ -290,23 +353,10 @@ class XunleiAdapter:
     def open_download(self, cookie: str, path: str):
         credential = self._live(self._creds(cookie))
         payload = self._send("GET", f"{API}/files/{_fid(path)}", credential)
-        url = payload.get("web_content_link")
-        if not isinstance(url, str) or not url:
+        url = _download_url(payload)
+        if not url:
             raise TransferFailed()
-        headers = self._headers(credential)
-        try:
-            response = self.client.get(url, headers={"User-Agent": headers["User-Agent"]}, timeout=30)
-        except Exception as exc:
-            raise TransferFailed() from exc
-        if response.status_code != 200:
-            raise TransferFailed()
-        length = response.headers.get("content-length")
-        size = int(length) if isinstance(length, str) and length.isdecimal() else len(response.content)
-
-        def chunks():
-            yield response.content
-
-        return DownloadStream(chunks(), size)
+        return stream_ranged_download(self.client, url, {"User-Agent": DOWNLOAD_UA})
 
     def list_share_records(self, cookie: str) -> list[dict]:
         credential = self._live(self._creds(cookie))
@@ -327,7 +377,11 @@ class XunleiAdapter:
             for item in batch:
                 if isinstance(item, dict):
                     records.append(_share_record(item))
-            page = payload.get("next_page_token") if isinstance(payload.get("next_page_token"), str) else ""
+            page = (
+                payload.get("next_page_token")
+                if isinstance(payload.get("next_page_token"), str)
+                else ""
+            )
             if not page:
                 return records
         raise TransferFailed()
@@ -358,10 +412,18 @@ class XunleiAdapter:
         }
         created = self._send("POST", f"{API}/share", credential, body=body)
         share_id = created.get("share_id")
-        url = created.get("share_url") if isinstance(created.get("share_url"), str) else ""
+        url = (
+            created.get("share_url")
+            if isinstance(created.get("share_url"), str)
+            else ""
+        )
         if not url and isinstance(share_id, str) and share_id:
             url = f"https://pan.xunlei.com/s/{share_id}"
-        returned = created.get("pass_code") if isinstance(created.get("pass_code"), str) else ""
+        returned = (
+            created.get("pass_code")
+            if isinstance(created.get("pass_code"), str)
+            else ""
+        )
         code = returned.strip()
         if not url or not code:
             raise TransferFailed()
@@ -434,7 +496,9 @@ class XunleiAdapter:
         _apply_tokens(credential, payload)
         return self._captcha(credential, "GET:/drive/v1/files")
 
-    def _wait_drive_task(self, cookie: str, task_id: str, sleeper: Callable[[float], None]) -> None:
+    def _wait_drive_task(
+        self, cookie: str, task_id: str, sleeper: Callable[[float], None]
+    ) -> None:
         # Task payloads include a human message like "已添加"; do not route through _send,
         # which treats any non-empty "message" as an API error.
         credential = self._live(self._creds(cookie))
@@ -442,7 +506,9 @@ class XunleiAdapter:
         action = f"GET:/drive/v1/tasks/{task_id}"
         for _ in range(40):
             try:
-                response = self.client.get(url, headers=self._headers(credential), timeout=20)
+                response = self.client.get(
+                    url, headers=self._headers(credential), timeout=20
+                )
             except Exception as exc:
                 raise TransferFailed() from exc
             if response.status_code == 429:
@@ -496,17 +562,37 @@ class XunleiAdapter:
         code = _error_code(payload)
         if not _retried and (response.status_code == 401 or code in _TOKEN_ERRORS):
             credential = self._refresh(credential)
-            return self._send(method, url, credential, params=params, body=body, invalid=invalid, action=action, _retried=True)
+            return self._send(
+                method,
+                url,
+                credential,
+                params=params,
+                body=body,
+                invalid=invalid,
+                action=action,
+                _retried=True,
+            )
         if not _retried and code == 9:
             credential["captcha_token"] = ""
             credential = self._captcha(credential, action or _action(method, url))
-            return self._send(method, url, credential, params=params, body=body, invalid=invalid, action=action, _retried=True)
+            return self._send(
+                method,
+                url,
+                credential,
+                params=params,
+                body=body,
+                invalid=invalid,
+                action=action,
+                _retried=True,
+            )
         if response.status_code >= 400 or _error_text(payload):
             _raise_api(payload, invalid=invalid)
         self._remember(credential)
         return payload
 
-    def _post_json(self, url: str, credential: dict, body: dict, *, authorized: bool) -> dict:
+    def _post_json(
+        self, url: str, credential: dict, body: dict, *, authorized: bool
+    ) -> dict:
         headers = self._headers(credential)
         if not authorized:
             headers.pop("Authorization", None)
@@ -524,10 +610,14 @@ class XunleiAdapter:
         client_id = _client_id(credential)
         headers = {
             "Authorization": f"Bearer {credential['access_token']}",
-            "User-Agent": LOGIN_USER_AGENT if client_id == LOGIN_CLIENT_ID else USER_AGENT,
+            "User-Agent": LOGIN_USER_AGENT
+            if client_id == LOGIN_CLIENT_ID
+            else USER_AGENT,
             "x-device-id": credential["device_id"],
             "x-client-id": client_id,
-            "x-client-version": "0.0.1" if client_id == LOGIN_CLIENT_ID else CLIENT_VERSION,
+            "x-client-version": "0.0.1"
+            if client_id == LOGIN_CLIENT_ID
+            else CLIENT_VERSION,
         }
         token = credential.get("captcha_token")
         if isinstance(token, str) and token:
@@ -580,7 +670,11 @@ def _jwt_exp(access_token: str | None) -> int | None:
 def _access_expiring(credential: dict, *, skew: int = _ACCESS_SKEW_SECONDS) -> bool:
     exp = credential.get("expires_at")
     if not isinstance(exp, (int, float)):
-        exp = _jwt_exp(credential.get("access_token") if isinstance(credential.get("access_token"), str) else None)
+        exp = _jwt_exp(
+            credential.get("access_token")
+            if isinstance(credential.get("access_token"), str)
+            else None
+        )
     if not isinstance(exp, (int, float)):
         return False
     return time.time() >= float(exp) - skew
@@ -589,7 +683,12 @@ def _access_expiring(credential: dict, *, skew: int = _ACCESS_SKEW_SECONDS) -> b
 def _apply_tokens(credential: dict, payload: dict) -> None:
     access = payload.get("access_token")
     refresh = payload.get("refresh_token")
-    if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh:
+    if (
+        not isinstance(access, str)
+        or not access
+        or not isinstance(refresh, str)
+        or not refresh
+    ):
         raise LoginRejected()
     credential["access_token"] = access
     credential["refresh_token"] = refresh
@@ -641,13 +740,50 @@ def _raise_api(payload: dict, *, invalid: bool) -> None:
     text = _error_text(payload)
     if "提取码" in text or "pass_code" in text:
         raise WrongPassword()
-    if "未登录" in text or "unauthenticated" in text or _error_code(payload) in _TOKEN_ERRORS:
+    if (
+        "未登录" in text
+        or "unauthenticated" in text
+        or _error_code(payload) in _TOKEN_ERRORS
+    ):
         raise LoginRejected()
     if "同名" in text or "duplicate" in text:
         raise DuplicateName()
     if invalid or "not_found" in text or "不存在" in text:
         raise InvalidLink()
     raise TransferFailed()
+
+
+def _download_url(payload: dict) -> str | None:
+    link = payload.get("web_content_link")
+    if isinstance(link, str) and link:
+        return link
+    medias = payload.get("medias")
+    if isinstance(medias, list):
+        origin = None
+        available = None
+        for item in medias:
+            if not isinstance(item, dict):
+                continue
+            media_link = item.get("link") if isinstance(item.get("link"), dict) else {}
+            url = media_link.get("url") if isinstance(media_link, dict) else None
+            if not isinstance(url, str) or not url:
+                continue
+            if item.get("need_more_quota"):
+                continue
+            if item.get("category") == "category_origin":
+                origin = url
+                break
+            if available is None:
+                available = url
+        if origin or available:
+            return origin or available
+    links = payload.get("links")
+    if isinstance(links, dict):
+        primary = links.get("primary") if isinstance(links.get("primary"), dict) else {}
+        url = primary.get("url") if isinstance(primary, dict) else None
+        if isinstance(url, str) and url:
+            return url
+    return None
 
 
 def _fid(directory: str) -> str:
@@ -703,7 +839,9 @@ def _s3_put_object(
         f"x-amz-security-token:{session_token}\n"
     )
     signed_headers = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
-    canonical_request = f"PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    canonical_request = (
+        f"PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    )
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
     string_to_sign = (
         f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n"
@@ -714,10 +852,14 @@ def _s3_put_object(
         return hmac.new(key, msg.encode(), hashlib.sha256).digest()
 
     signing_key = _sign(
-        _sign(_sign(_sign(("AWS4" + secret_key).encode(), date_stamp), region), service),
+        _sign(
+            _sign(_sign(("AWS4" + secret_key).encode(), date_stamp), region), service
+        ),
         "aws4_request",
     )
-    signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(
+        signing_key, string_to_sign.encode(), hashlib.sha256
+    ).hexdigest()
     authorization = (
         f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, "
         f"SignedHeaders={signed_headers}, Signature={signature}"

@@ -1,6 +1,6 @@
-export default function BrandMark({ light = false }: { light?: boolean }) {
+export default function BrandMark({ light = false, compact = false }: { light?: boolean; compact?: boolean }) {
   return (
-    <div className="flex items-center gap-2.5">
+    <div className={`flex items-center ${compact ? "justify-center" : "gap-2.5"}`}>
       <span
         className={`grid h-9 w-9 place-items-center rounded-xl ${light ? "bg-white text-primary" : "bg-primary text-white"}`}
       >
@@ -9,7 +9,11 @@ export default function BrandMark({ light = false }: { light?: boolean }) {
           <path d="M8 7.15v6.35M3.05 5.45 8 8.15l4.95-2.7" stroke="currentColor" strokeWidth="1.5" />
         </svg>
       </span>
-      <span className={`text-[15px] font-extrabold tracking-[-0.03em] ${light ? "text-white" : "text-ink"}`}>网盘工具</span>
+      {compact ? (
+        <span className="sr-only">网盘工具</span>
+      ) : (
+        <span className={`text-[15px] font-extrabold tracking-[-0.03em] ${light ? "text-white" : "text-ink"}`}>网盘工具</span>
+      )}
     </div>
   );
 }

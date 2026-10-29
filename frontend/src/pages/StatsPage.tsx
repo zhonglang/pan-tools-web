@@ -32,6 +32,15 @@ function deltaText(value: number | null) {
   return String(value);
 }
 
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true">
+      <rect x="9" y="3" width="11" height="14" rx="2" stroke="currentColor" strokeWidth="1.75" />
+      <rect x="4" y="7" width="11" height="14" rx="2" stroke="currentColor" strokeWidth="1.75" />
+    </svg>
+  );
+}
+
 export default function StatsPage({ user }: { user: User }) {
   const initialRange = shortcutRange("today");
   const [accounts, setAccounts] = useState<PanAccount[]>([]);
@@ -47,8 +56,59 @@ export default function StatsPage({ user }: { user: User }) {
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [accountsLoaded, setAccountsLoaded] = useState(false);
+  const [toast, setToast] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const statsTicket = useRef(0);
+  const toastTimer = useRef(0);
   const ranged = Boolean(start && end);
+
+  function showToast(message: string) {
+    setToast(message);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function copyLink(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("已复制");
+    } catch {
+      showToast("复制失败");
+    }
+  }
+
+  async function copySelected() {
+    const urls = [...selected];
+    if (urls.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(urls.join("\n"));
+      showToast(`已复制 ${urls.length} 条`);
+    } catch {
+      showToast("复制失败");
+    }
+  }
+
+  function toggleUrl(url: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  }
+
+  function togglePage(urls: string[]) {
+    setSelected((current) => {
+      const next = new Set(current);
+      const allOn = urls.length > 0 && urls.every((url) => next.has(url));
+      if (allOn) {
+        for (const url of urls) next.delete(url);
+      } else {
+        for (const url of urls) next.add(url);
+      }
+      return next;
+    });
+  }
 
   function loadAccounts() {
     return api
@@ -77,6 +137,10 @@ export default function StatsPage({ user }: { user: User }) {
   }, [nameInput]);
 
   useEffect(() => {
+    setSelected(new Set());
+  }, [accountId, end, nameQuery, start]);
+
+  useEffect(() => {
     if (!user.paid_features) return;
     if (ranged && start > end) {
       setError("开始日期不能晚于结束日期");
@@ -101,6 +165,10 @@ export default function StatsPage({ user }: { user: User }) {
   }, [accountId, end, nameQuery, page, pageSize, ranged, start, user.paid_features]);
 
   const account = accounts.find((row) => row.id === accountId) ?? null;
+  const pageUrls = stats?.rows.map((row) => row.url) ?? [];
+  const pageAllSelected = pageUrls.length > 0 && pageUrls.every((url) => selected.has(url));
+  const pageSomeSelected = pageUrls.some((url) => selected.has(url));
+  const colSpan = (ranged ? 8 : 7) + 1;
 
   const syncTargets = (accountId == null ? accounts : account ? [account] : []).filter(
     (row) => row.provider === "baidu" && row.status === "valid",
@@ -268,7 +336,20 @@ export default function StatsPage({ user }: { user: User }) {
       ) : null}
       <section className="mt-6 overflow-hidden rounded-2xl border border-line bg-white">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-          <h2 className="text-base font-semibold">分享列表</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-base font-semibold">分享列表</h2>
+            {selected.size > 0 ? (
+              <>
+                <span className="text-sm text-ink/55">已选 {selected.size}</span>
+                <button type="button" className="btn btn-secondary" onClick={() => void copySelected()}>
+                  复制全部链接
+                </button>
+                <button type="button" className="text-sm text-ink/45 hover:text-ink" onClick={() => setSelected(new Set())}>
+                  清空
+                </button>
+              </>
+            ) : null}
+          </div>
           <div className="flex flex-wrap items-center gap-3">
             <input
               type="search"
@@ -286,9 +367,21 @@ export default function StatsPage({ user }: { user: User }) {
             : "按当前账号，比较各分享当前的浏览、下载和转存累计。"}
         </p>
         <div className="max-h-[32rem] overflow-auto">
-          <table className={`w-full border-collapse text-left text-sm ${ranged ? "min-w-[860px]" : "min-w-[760px]"}`}>
+          <table className={`w-full border-collapse text-left text-sm ${ranged ? "min-w-[900px]" : "min-w-[800px]"}`}>
             <thead className="sticky top-0 bg-canvas text-[12px] text-ink/50">
               <tr>
+                <th className="w-10 px-4 py-3">
+                  <input
+                    type="checkbox"
+                    aria-label="全选本页"
+                    checked={pageAllSelected}
+                    ref={(node) => {
+                      if (node) node.indeterminate = !pageAllSelected && pageSomeSelected;
+                    }}
+                    disabled={pageUrls.length === 0 || loading}
+                    onChange={() => togglePage(pageUrls)}
+                  />
+                </th>
                 <th className="px-4 py-3 font-medium">排名</th>
                 <th className="px-4 py-3 font-medium">分析名称</th>
                 <th className="px-4 py-3 font-medium">账号名称</th>
@@ -300,17 +393,17 @@ export default function StatsPage({ user }: { user: User }) {
               </tr>
             </thead>
             <tbody>
-              {loading ? <TableLoading colSpan={ranged ? 8 : 7} /> : null}
+              {loading ? <TableLoading colSpan={colSpan} /> : null}
               {!loading && accountsLoaded && accounts.length === 0 ? (
                 <tr>
-                  <td colSpan={ranged ? 8 : 7} className="px-4 py-10 text-center text-ink/45">
+                  <td colSpan={colSpan} className="px-4 py-10 text-center text-ink/45">
                     还没有网盘账号。
                   </td>
                 </tr>
               ) : null}
               {!loading && stats && accounts.length > 0 && stats.rows.length === 0 ? (
                 <tr>
-                  <td colSpan={ranged ? 8 : 7} className="px-4 py-10 text-center text-ink/45">
+                  <td colSpan={colSpan} className="px-4 py-10 text-center text-ink/45">
                     {nameQuery ? "没有匹配的分享。" : "还没有可统计的分享。"}
                   </td>
                 </tr>
@@ -318,13 +411,32 @@ export default function StatsPage({ user }: { user: User }) {
               {!loading
                 ? stats?.rows.map((row, index) => (
                     <tr key={row.url} className="border-t border-line">
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择 ${row.name || row.url}`}
+                          checked={selected.has(row.url)}
+                          onChange={() => toggleUrl(row.url)}
+                        />
+                      </td>
                       <td className="px-4 py-3 text-ink/70">{(stats.page - 1) * stats.page_size + index + 1}</td>
                       <td className="max-w-40 truncate px-4 py-3 font-medium">{row.name || "—"}</td>
                       <td className="max-w-40 truncate px-4 py-3">{row.account_name || "—"}</td>
-                      <td className="max-w-md break-all px-4 py-3">
-                        <a href={row.url} target="_blank" rel="noreferrer" className="text-ink hover:underline">
-                          {row.url}
-                        </a>
+                      <td className="max-w-md px-4 py-3">
+                        <div className="flex items-start gap-2">
+                          <a href={row.url} target="_blank" rel="noreferrer" className="min-w-0 break-all text-ink hover:underline">
+                            {row.url}
+                          </a>
+                          <button
+                            type="button"
+                            aria-label="复制分享链接"
+                            title="复制链接"
+                            className="mt-0.5 shrink-0 text-ink/40 hover:text-ink"
+                            onClick={() => void copyLink(row.url)}
+                          >
+                            <CopyIcon />
+                          </button>
+                        </div>
                       </td>
                       <td className="px-4 py-3">{metricText(row.views)}</td>
                       <td className="px-4 py-3">{metricText(row.downloads)}</td>
@@ -351,6 +463,11 @@ export default function StatsPage({ user }: { user: User }) {
           }}
         />
       </section>
+      {toast ? (
+        <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full bg-[#1f2430] px-4 py-2 text-sm text-white shadow-lg">
+          {toast}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -12,7 +12,13 @@ from app.services.transfers import keep_warmed
 from app.models import Job, JobItem, PanAccount, ShareLink
 from app.pans import adapter_for
 from app.pans.errors import LoginRejected, RateLimited, TransferFailed
-from app.services.transfers import EXPIRED, RETRY_DELAYS, fail_remaining, finish_job, publish
+from app.services.transfers import (
+    EXPIRED,
+    RETRY_DELAYS,
+    fail_remaining,
+    finish_job,
+    publish,
+)
 
 _SHARE_ID = re.compile(r"/s/1([0-9A-Za-z_-]+)")
 
@@ -48,7 +54,9 @@ def execute_share(
     job.updated_at = now
     publish(session)
     account = session.get(PanAccount, job.account_id)
-    items = session.scalars(select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.id)).all()
+    items = session.scalars(
+        select(JobItem).where(JobItem.job_id == job.id).order_by(JobItem.id)
+    ).all()
     if account is None or account.status != "valid":
         fail_remaining(items, 0, now)
         finish_job(job, items, now)
@@ -159,4 +167,3 @@ def shares_xlsx(rows: list[ShareLink]) -> bytes:
     buffer = io.BytesIO()
     book.save(buffer)
     return buffer.getvalue()
-

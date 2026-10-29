@@ -6,7 +6,7 @@ const DELTA_POS = "#c2410c";
 const DELTA_NEG = "#64748b";
 const WIDTH = 720;
 const HEIGHT = 280;
-const PAD = { top: 16, right: 48, bottom: 32, left: 48 };
+const PAD = { top: 28, right: 48, bottom: 32, left: 48 };
 
 function labelIndexes(count: number) {
   if (count <= 8) return Array.from({ length: count }, (_, index) => index);
@@ -156,16 +156,27 @@ export default function TransferChart({
                     const top = Math.min(y, zeroY);
                     const height = Math.max(1, Math.abs(y - zeroY));
                     return (
-                      <rect
-                        key={`bar-${index}`}
-                        x={xAt(index) - barW / 2}
-                        y={top}
-                        width={barW}
-                        height={height}
-                        rx="2"
-                        fill={value >= 0 ? DELTA_POS : DELTA_NEG}
-                        opacity={hover == null || hover === index ? 0.85 : 0.3}
-                      />
+                      <g key={`bar-${index}`} opacity={hover == null || hover === index ? 1 : 0.35}>
+                        <rect
+                          x={xAt(index) - barW / 2}
+                          y={top}
+                          width={barW}
+                          height={height}
+                          rx="2"
+                          fill={DELTA_POS}
+                          opacity={0.85}
+                        />
+                        <text
+                          x={xAt(index)}
+                          y={top - 6}
+                          textAnchor="middle"
+                          fill={DELTA_POS}
+                          fontSize="11"
+                          fontWeight="600"
+                        >
+                          {String(value)}
+                        </text>
+                      </g>
                     );
                   })
                 : null}
@@ -217,13 +228,7 @@ export default function TransferChart({
                       <span className="inline-block h-2 w-2 rounded-sm" style={{ background: DELTA_POS }} />
                       日增量
                     </span>
-                    <span>
-                      {deltaLine?.values[hover] == null
-                        ? "暂无"
-                        : (deltaLine.values[hover] as number) > 0
-                          ? `+${deltaLine.values[hover]}`
-                          : deltaLine.values[hover]}
-                    </span>
+                    <span>{deltaLine?.values[hover] == null ? "暂无" : deltaLine.values[hover]}</span>
                   </li>
                 </ul>
               </div>

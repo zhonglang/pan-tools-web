@@ -5,9 +5,13 @@ class LibraryItemOut(BaseModel):
     id: int
     prefix: str
     name: str
+    finished: bool = False
+    latest_episode: int | None = None
+    previous_episode: int | None = None
     xunlei_url: str
     quark_url: str
     baidu_url: str
+    updated_at: str | None = None
 
 
 class LibraryImportRowIn(BaseModel):
@@ -43,6 +47,8 @@ class LibraryCheckOut(BaseModel):
 
 class LibraryItemIn(BaseModel):
     name: str = Field(default="", max_length=512)
+    finished: bool = False
+    latest_episode: int | None = None
     xunlei_url: str = Field(default="", max_length=4000)
     quark_url: str = Field(default="", max_length=4000)
     baidu_url: str = Field(default="", max_length=4000)
@@ -51,6 +57,8 @@ class LibraryItemIn(BaseModel):
 class LibraryCreateIn(BaseModel):
     prefix: str = Field(min_length=1, max_length=16)
     name: str = Field(min_length=1, max_length=512)
+    finished: bool = False
+    latest_episode: int | None = None
     xunlei_url: str = Field(default="", max_length=4000)
     quark_url: str = Field(default="", max_length=4000)
     baidu_url: str = Field(default="", max_length=4000)

@@ -35,8 +35,12 @@ def write_entries(
     for name, remote, _size in planned:
         if stop():
             raise DownloadCancelled()
-        relative = name[len(prefix):] if name.startswith(prefix) else ""
-        parts = [_segment(part) for part in relative.split("/") if part not in {"", ".", ".."}]
+        relative = name[len(prefix) :] if name.startswith(prefix) else ""
+        parts = [
+            _segment(part)
+            for part in relative.split("/")
+            if part not in {"", ".", ".."}
+        ]
         if remote is None:
             folder = dest
             for part in parts:

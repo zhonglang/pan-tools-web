@@ -5,11 +5,11 @@ from app.services.library_links import check_library_links, classify_baidu, clas
 from tests.test_library import register
 
 
-def test_baidu_dead_code_is_invalid_and_a_wrong_password_is_not():
+def test_baidu_dead_code_is_invalid_and_alive_share_is_ok():
     assert classify_baidu({"errno": 105}) == "invalid"
     assert classify_baidu({"errno": -21}) == "invalid"
+    assert classify_baidu({"errno": 115}) == "invalid"
     assert classify_baidu({"errno": 0}) == "ok"
-    assert classify_baidu({"errno": -9}) == "ok"
     assert classify_baidu({"errno": 31034}) == "unknown"
 
 
@@ -27,12 +27,77 @@ def test_xunlei_not_found_is_invalid_and_a_bad_code_is_not():
     assert classify_xunlei({"error": "captcha_invalid", "error_code": 9}) == "unknown"
 
 
+def test_baidu_check_uses_share_page_not_verify():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/s/1deadpage":
+            return httpx.Response(
+                200,
+                text='locals.mset({"errno":115,"share_page_type":"error"});',
+            )
+        if request.url.path == "/s/1livepage":
+            return httpx.Response(302, headers={"location": "/share/init?surl=livepage"})
+        if request.url.path == "/s/1missingpage":
+            return httpx.Response(404, text="Not Found")
+        raise AssertionError(request.url)
+
+    items = [
+        LibraryItem(id=1, user_id=1, prefix="001", name="死链", baidu_url="https://pan.baidu.com/s/1deadpage", quark_url="", xunlei_url=""),
+        LibraryItem(id=2, user_id=1, prefix="002", name="活链", baidu_url="https://pan.baidu.com/s/1livepage", quark_url="", xunlei_url=""),
+        LibraryItem(id=3, user_id=1, prefix="003", name="不存在", baidu_url="https://pan.baidu.com/s/1missingpage", quark_url="", xunlei_url=""),
+    ]
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False) as http:
+        result = check_library_links(items, http)
+    assert "/share/verify" not in seen
+    assert result.checked == 3
+    assert result.unknown == 0
+    assert [(hit.prefix, hit.provider) for hit in result.invalid] == [
+        ("001", "baidu"),
+        ("003", "baidu"),
+    ]
+
+
+def test_baidu_check_does_not_send_polluted_client_cookies():
+    """共享 Client 上的 PANPSC 会让百度对有效链返回 404，不能带到检查请求里。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cookie = request.headers.get("cookie", "")
+        if "PANPSC" in cookie:
+            return httpx.Response(404, text="Not Found")
+        if request.url.path == "/s/1livecookie":
+            return httpx.Response(302, headers={"location": "/share/init?surl=livecookie"})
+        raise AssertionError(request.url)
+
+    item = LibraryItem(
+        id=1,
+        user_id=1,
+        prefix="001",
+        name="活链",
+        baidu_url="https://pan.baidu.com/s/1livecookie",
+        quark_url="",
+        xunlei_url="",
+    )
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False) as http:
+        http.cookies.set("PANPSC", "polluted")
+        result = check_library_links([item], http)
+    assert result.checked == 1
+    assert result.unknown == 0
+    assert result.invalid == []
+
+
 def test_check_collects_only_dead_links(client):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path.endswith("/share/verify"):
-            errno = 105 if request.url.params["surl"] == "deadbd" else 0
-            return httpx.Response(200, json={"errno": errno})
+        if path.startswith("/s/1"):
+            surl = path.removeprefix("/s/1")
+            if surl == "deadbd":
+                return httpx.Response(
+                    200,
+                    text='locals.mset({"errno":115,"errortype":3,"share_page_type":"error","file_list":[]});',
+                )
+            return httpx.Response(302, headers={"location": f"/share/init?surl={surl}"})
         if path.endswith("/share/sharepage/token"):
             return httpx.Response(404, json={"status": 404, "message": "分享不存在"})
         if path.endswith("/shield/captcha/init"):

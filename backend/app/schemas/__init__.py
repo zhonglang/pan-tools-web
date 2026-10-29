@@ -1,8 +1,19 @@
-from app.schemas.account import AccountBindIn, AccountCookieIn, AccountOut, BaiduLoginOut, BaiduLoginStartIn
+from app.schemas.account import (
+    AccountBindIn,
+    AccountCookieIn,
+    AccountOut,
+    BaiduLoginOut,
+    BaiduLoginStartIn,
+)
 from app.schemas.auth import LoginIn, PlanUpdateIn, RegisterIn, UserOut
 from app.schemas.download import DownloadTaskOut
 from app.schemas.job import JobItemOut, JobOut, JobSummaryOut
-from app.schemas.share import ShareBatchIn, SharePasswordsIn, SharePasswordsOut, ShareTargetIn
+from app.schemas.share import (
+    ShareBatchIn,
+    SharePasswordsIn,
+    SharePasswordsOut,
+    ShareTargetIn,
+)
 from app.schemas.stats import MetricOut, RankRowOut, SeriesLineOut, StatsOut
 from app.schemas.transfer import (
     CopyIn,
@@ -11,6 +22,7 @@ from app.schemas.transfer import (
     CreateFolderIn,
     DirEntryOut,
     FilePathIn,
+    FilePathsIn,
     OkOut,
     RenameIn,
     ShareIn,
@@ -32,6 +44,7 @@ __all__ = [
     "DirEntryOut",
     "DownloadTaskOut",
     "FilePathIn",
+    "FilePathsIn",
     "JobItemOut",
     "JobOut",
     "JobSummaryOut",

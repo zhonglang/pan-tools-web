@@ -3,14 +3,68 @@ import { api, type LibraryCheckResult, type LibraryItem } from "../api";
 import PageHeader from "../components/PageHeader";
 import { workbookShareRows } from "../sheets";
 
-type Filter = "all" | "complete" | "quark" | "baidu" | "xunlei";
-type Draft = { name: string; quark_url: string; baidu_url: string; xunlei_url: string };
-type CreateDraft = { prefix: string; name: string; quark_url: string; baidu_url: string; xunlei_url: string };
+type Filter = "all" | "finished" | "complete" | "quark" | "baidu" | "xunlei";
+type Draft = {
+  name: string;
+  finished: boolean;
+  latest_episode: string;
+  quark_url: string;
+  baidu_url: string;
+  xunlei_url: string;
+};
+type CreateDraft = {
+  prefix: string;
+  name: string;
+  finished: boolean;
+  latest_episode: string;
+  quark_url: string;
+  baidu_url: string;
+  xunlei_url: string;
+};
 
-const emptyCreate: CreateDraft = { prefix: "", name: "", quark_url: "", baidu_url: "", xunlei_url: "" };
+const emptyCreate: CreateDraft = {
+  prefix: "",
+  name: "",
+  finished: false,
+  latest_episode: "",
+  quark_url: "",
+  baidu_url: "",
+  xunlei_url: "",
+};
+
+function parseEpisode(value: string): number | null {
+  const cleaned = value.trim();
+  if (!cleaned) return null;
+  const num = Number(cleaned);
+  return Number.isInteger(num) && num >= 0 ? num : null;
+}
+
+function progressLabel(item: Pick<LibraryItem, "finished" | "latest_episode">) {
+  if (item.finished && item.latest_episode != null) return `完结｜${item.latest_episode}`;
+  if (item.finished) return "完结";
+  if (item.latest_episode != null) return `更新至 ${item.latest_episode}`;
+  return "";
+}
+
+function cleanCopyName(name: string) {
+  return name
+    .replace(/#完结/g, "")
+    .replace(/#\d+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function progressCopyLine(item: LibraryItem) {
+  const icon = item.finished ? "✅" : "🔥";
+  const parts = [item.prefix, cleanCopyName(item.name) || "未填写名称"];
+  if (item.latest_episode != null) parts.push(String(item.latest_episode));
+  if (item.finished) parts.push("完结");
+  return `${icon}  ${parts.join("｜")}`;
+}
 
 const filters: { id: Filter; label: string }[] = [
   { id: "all", label: "全部" },
+  { id: "finished", label: "完结" },
   { id: "complete", label: "三网盘齐全" },
   { id: "quark", label: "有夸克" },
   { id: "baidu", label: "有百度" },
@@ -38,6 +92,7 @@ function linkCount(item: LibraryItem) {
 }
 
 function matchesFilter(item: LibraryItem, filter: Filter) {
+  if (filter === "finished") return item.finished;
   if (filter === "complete") return linkCount(item) === pans.length;
   if (filter === "quark") return Boolean(item.quark_url.trim());
   if (filter === "baidu") return Boolean(item.baidu_url.trim());
@@ -57,23 +112,43 @@ export default function LibraryPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<LibraryItem | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [draft, setDraft] = useState<Draft>({ name: "", quark_url: "", baidu_url: "", xunlei_url: "" });
+  const [draft, setDraft] = useState<Draft>({
+    name: "",
+    finished: false,
+    latest_episode: "",
+    quark_url: "",
+    baidu_url: "",
+    xunlei_url: "",
+  });
   const [saving, setSaving] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(emptyCreate);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const [checking, setChecking] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [checkResult, setCheckResult] = useState<LibraryCheckResult | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef(0);
 
+  async function loadLibrary(opts?: { soft?: boolean }) {
+    const soft = Boolean(opts?.soft);
+    if (soft) setRefreshing(true);
+    else setLoading(true);
+    setError("");
+    try {
+      setItems(await api.library());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "读取失败");
+    } finally {
+      if (soft) setRefreshing(false);
+      else setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    api
-      .library()
-      .then(setItems)
-      .catch((caught: Error) => setError(caught.message))
-      .finally(() => setLoading(false));
+    void loadLibrary();
   }, []);
 
   const visible = useMemo(() => {
@@ -162,10 +237,32 @@ export default function LibraryPage() {
     }
   }
 
+  async function syncEpisodes() {
+    if (syncing) return;
+    setSyncing(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api.syncLibraryEpisodes();
+      const refreshed = await api.library();
+      setItems(refreshed);
+      setNotice(
+        `同步完成：更新 ${result.updated} 部，未变 ${result.unchanged} 部` +
+          (result.unmatched ? `，网盘有而资源库没有 ${result.unmatched} 个` : ""),
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "同步失败");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   function startEdit(item: LibraryItem) {
     setEditingId(item.id);
     setDraft({
       name: item.name,
+      finished: item.finished,
+      latest_episode: item.latest_episode == null ? "" : String(item.latest_episode),
       quark_url: item.quark_url,
       baidu_url: item.baidu_url,
       xunlei_url: item.xunlei_url,
@@ -178,7 +275,14 @@ export default function LibraryPage() {
     setSaving(true);
     setError("");
     try {
-      const updated = await api.updateLibrary(item.id, draft);
+      const updated = await api.updateLibrary(item.id, {
+        name: draft.name,
+        finished: draft.finished,
+        latest_episode: parseEpisode(draft.latest_episode),
+        quark_url: draft.quark_url,
+        baidu_url: draft.baidu_url,
+        xunlei_url: draft.xunlei_url,
+      });
       setItems((current) => current.map((row) => (row.id === updated.id ? updated : row)));
       setEditingId(null);
     } catch (caught) {
@@ -202,6 +306,8 @@ export default function LibraryPage() {
       const created = await api.createLibrary({
         prefix: createDraft.prefix.trim(),
         name: createDraft.name.trim(),
+        finished: createDraft.finished,
+        latest_episode: parseEpisode(createDraft.latest_episode),
         quark_url: createDraft.quark_url.trim(),
         baidu_url: createDraft.baidu_url.trim(),
         xunlei_url: createDraft.xunlei_url.trim(),
@@ -226,28 +332,6 @@ export default function LibraryPage() {
       <PageHeader
         title="AI漫剧网盘资源库"
         description="输入剧名即可搜索，点网盘名复制链接。相同数字前缀会归成同一部。"
-        extra={
-          <>
-            <input
-              ref={fileInput}
-              type="file"
-              accept=".xlsx,.xls"
-              multiple
-              className="sr-only"
-              aria-label="上传分享表格"
-              onChange={(event) => void onUpload(event.target.files)}
-            />
-            <button type="button" disabled={checking || loading} onClick={() => void checkLinks()} className="btn btn-secondary">
-              {checking ? "正在检查" : "检查链接"}
-            </button>
-            <button type="button" disabled={pending || creating} onClick={openCreate} className="btn btn-secondary">
-              新增资源
-            </button>
-            <button type="button" disabled={pending} onClick={() => fileInput.current?.click()} className="btn btn-primary">
-              {pending ? "正在导入" : "上传表格"}
-            </button>
-          </>
-        }
       />
       {error ? <p className="alert mb-4">{error}</p> : null}
       {notice ? <p className="mb-4 text-sm text-[#067647]">{notice}</p> : null}
@@ -281,6 +365,52 @@ export default function LibraryPage() {
           )}
         </section>
       ) : null}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".xlsx,.xls"
+          multiple
+          className="sr-only"
+          aria-label="上传分享表格"
+          onChange={(event) => void onUpload(event.target.files)}
+        />
+        <button type="button" disabled={pending} onClick={() => fileInput.current?.click()} className="btn btn-primary">
+          {pending ? "正在导入" : "上传表格"}
+        </button>
+        <a
+          href="/api/library/export"
+          className={`btn btn-secondary ${loading || items.length === 0 ? "pointer-events-none opacity-50" : ""}`}
+          aria-disabled={loading || items.length === 0}
+        >
+          导出表格
+        </a>
+        <button type="button" disabled={checking || loading} onClick={() => void checkLinks()} className="btn btn-secondary">
+          {checking ? "正在检查" : "检查链接"}
+        </button>
+        <button type="button" disabled={syncing || loading} onClick={() => void syncEpisodes()} className="btn btn-secondary">
+          {syncing ? "正在同步" : "同步"}
+        </button>
+        <button type="button" disabled={pending || creating} onClick={openCreate} className="btn btn-secondary">
+          新增资源
+        </button>
+        <button
+          type="button"
+          disabled={loading || refreshing}
+          onClick={() => void loadLibrary({ soft: true })}
+          className="btn btn-secondary disabled:opacity-50"
+        >
+          {refreshing ? "正在刷新" : "刷新"}
+        </button>
+        <button
+          type="button"
+          disabled={loading || visible.length === 0}
+          onClick={() => void copyText(visible.map(progressCopyLine).join("\n"))}
+          className="btn btn-secondary disabled:opacity-50"
+        >
+          复制名称
+        </button>
+      </div>
       <label className="relative block">
         <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#98a2b3]" aria-hidden="true">
           ⌕
@@ -338,7 +468,12 @@ export default function LibraryPage() {
                     className="h-9 min-w-0 flex-1 rounded-lg border border-[#e4e7ee] px-3 text-sm font-semibold outline-none"
                   />
                 ) : (
-                  <h2 className="min-w-0 flex-1 truncate pt-0.5 text-base font-semibold text-[#1f2430]">{item.name || "未填写名称"}</h2>
+                  <div className="min-w-0 flex-1 pt-0.5">
+                    <h2 className="truncate text-base font-semibold text-[#1f2430]">{item.name || "未填写名称"}</h2>
+                    {progressLabel(item) ? (
+                      <p className="mt-0.5 text-xs text-[#667085]">{progressLabel(item)}</p>
+                    ) : null}
+                  </div>
                 )}
                 {editing ? null : (
                   <span className="flex shrink-0 items-center gap-2">
@@ -361,6 +496,25 @@ export default function LibraryPage() {
               </div>
               {editing ? (
                 <div className="mt-4 grid gap-3">
+                  <div className="flex flex-wrap items-center gap-3 text-sm text-[#344054]">
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={draft.finished}
+                        onChange={(event) => setDraft((current) => ({ ...current, finished: event.target.checked }))}
+                      />
+                      已完结
+                    </label>
+                    <label className="inline-flex items-center gap-2">
+                      最新集数
+                      <input
+                        value={draft.latest_episode}
+                        onChange={(event) => setDraft((current) => ({ ...current, latest_episode: event.target.value }))}
+                        inputMode="numeric"
+                        className="h-9 w-24 rounded-lg border border-[#e4e7ee] px-3 text-sm outline-none"
+                      />
+                    </label>
+                  </div>
                   {pans.map((pan) => (
                     <label key={pan.key} className="block text-sm text-[#344054]">
                       {pan.label}链接
@@ -484,6 +638,25 @@ export default function LibraryPage() {
                   className="mt-1 h-10 w-full rounded-lg border border-[#e4e7ee] px-3 text-sm outline-none"
                 />
               </label>
+              <div className="flex flex-wrap items-center gap-3 text-sm text-[#344054]">
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={createDraft.finished}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, finished: event.target.checked }))}
+                  />
+                  已完结
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  最新集数
+                  <input
+                    value={createDraft.latest_episode}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, latest_episode: event.target.value }))}
+                    inputMode="numeric"
+                    className="h-10 w-24 rounded-lg border border-[#e4e7ee] px-3 text-sm outline-none"
+                  />
+                </label>
+              </div>
               {pans.map((pan) => (
                 <label key={pan.key} className="block text-sm text-[#344054]">
                   {pan.label}链接

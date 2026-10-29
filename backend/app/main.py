@@ -17,7 +17,16 @@ from app.core.config import get_settings
 from app.core.database import Base, make_engine, make_session_factory
 from app.services.downloads import interrupt_orphans
 from app.services.uploads import interrupt_upload_orphans
-from app.api.routes import accounts, admin, auth, library, settings as settings_routes, shares, stats, transfers
+from app.api.routes import (
+    accounts,
+    admin,
+    auth,
+    library,
+    settings as settings_routes,
+    shares,
+    stats,
+    transfers,
+)
 
 
 @asynccontextmanager

@@ -72,7 +72,9 @@ def account_stats(
         raise HTTPException(status_code=422, detail="查询条件无效")
     moment = now_utc()
     start, end = range_bounds(span, moment)
-    data = query_stats(session, [account], moment, rank, page, start, end, _page_size(page_size))
+    data = query_stats(
+        session, [account], moment, rank, page, start, end, _page_size(page_size)
+    )
     return _stats_out(data)
 
 
@@ -108,7 +110,15 @@ def user_stats(
             raise HTTPException(status_code=422, detail="时间范围无效") from error
     mode = "range" if start_at is not None else "history"
     data = query_stats(
-        session, accounts, moment, mode, page, start_at, end_at, _page_size(page_size), name=name
+        session,
+        accounts,
+        moment,
+        mode,
+        page,
+        start_at,
+        end_at,
+        _page_size(page_size),
+        name=name,
     )
     return _stats_out(data)
 

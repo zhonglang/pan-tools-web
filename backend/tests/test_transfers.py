@@ -326,6 +326,38 @@ def test_rename_and_folder_download(client):
     assert root.json()["detail"] == "不能操作根目录"
 
 
+def test_delete_batch_sends_all_paths_once(client):
+    from urllib.parse import parse_qs
+
+    register(client)
+    account_id = bind(client)
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "gettemplatevariable" in url:
+            return httpx.Response(200, json={"errno": 0, "result": {"bdstoken": "bd-token"}})
+        if "filemanager" in url and request.url.params["opera"] == "delete":
+            form = parse_qs(request.content.decode())
+            seen["filelist"] = json.loads(form["filelist"][0])
+            return httpx.Response(200, json={"errno": 0})
+        raise AssertionError(url)
+
+    install(client, handler)
+    deleted = client.post(
+        f"/api/accounts/{account_id}/files/delete-batch",
+        json={"paths": ["/a.txt", "/子文件夹", "/b.txt"]},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True}
+    assert seen["filelist"] == ["/a.txt", "/子文件夹", "/b.txt"]
+    empty = client.post(f"/api/accounts/{account_id}/files/delete-batch", json={"paths": []})
+    assert empty.status_code == 422
+    root = client.post(f"/api/accounts/{account_id}/files/delete-batch", json={"paths": ["/"]})
+    assert root.status_code == 422
+    assert root.json()["detail"] == "不能操作根目录"
+
+
 def test_folder_download_returns_a_zip(client):
     import io
     import zipfile

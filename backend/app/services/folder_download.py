@@ -10,7 +10,9 @@ class FolderTooLarge(Exception):
     pass
 
 
-def archive_entries(adapter: BaiduAdapter, cookie: str, directory: str) -> list[tuple[str, str | None, int]]:
+def archive_entries(
+    adapter: BaiduAdapter, cookie: str, directory: str
+) -> list[tuple[str, str | None, int]]:
     base = "全部文件" if directory == "/" else directory.rstrip("/").rsplit("/", 1)[-1]
     planned: list[tuple[str, str | None, int]] = []
 
@@ -43,7 +45,9 @@ def archive_entries(adapter: BaiduAdapter, cookie: str, directory: str) -> list[
     return planned
 
 
-def archive_body(adapter: BaiduAdapter, cookie: str, planned: list[tuple[str, str | None, int]]) -> Iterator[bytes]:
+def archive_body(
+    adapter: BaiduAdapter, cookie: str, planned: list[tuple[str, str | None, int]]
+) -> Iterator[bytes]:
     from app.services.zip_stream import stream_stored_zip
 
     files: list[tuple[str, int, Iterator[bytes] | None]] = []

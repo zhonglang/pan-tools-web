@@ -101,8 +101,13 @@ def start_qr(client: httpx.Client) -> StartedQr:
     image_response = _get(client, _absolute_image_url(imgurl))
     if image_response.status_code != 200 or not image_response.content:
         raise QrLoginFailed()
-    content_type = image_response.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
-    return StartedQr(sign=sign, gid=gid, image=image_response.content, content_type=content_type)
+    content_type = (
+        image_response.headers.get("content-type", "image/png").split(";")[0].strip()
+        or "image/png"
+    )
+    return StartedQr(
+        sign=sign, gid=gid, image=image_response.content, content_type=content_type
+    )
 
 
 def _cookie_from_login(response: httpx.Response) -> str:

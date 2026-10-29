@@ -25,7 +25,9 @@ class StartedQr:
 
 
 class PolledQr:
-    def __init__(self, state: str, cookie: str | None = None, nickname: str | None = None) -> None:
+    def __init__(
+        self, state: str, cookie: str | None = None, nickname: str | None = None
+    ) -> None:
         self.state = state
         self.cookie = cookie
         self.nickname = nickname
@@ -71,7 +73,9 @@ def _scan_url(verification_uri_complete: str) -> str:
     if "user_code" not in dict(parse_qsl(parts.query)):
         raise QrLoginFailed()
     if parts.path.rstrip("/") == "/__/auth/device":
-        return "https://i.xunlei.com/center/account/personal/qrcode-login/?" + parts.query
+        return (
+            "https://i.xunlei.com/center/account/personal/qrcode-login/?" + parts.query
+        )
     return verification_uri_complete
 
 
@@ -81,7 +85,11 @@ def start_qr(client: httpx.Client) -> StartedQr:
         client,
         f"{AUTH}/auth/device/code",
         device_id,
-        {"client_id": CLIENT_ID, "scope": "profile offline pan sso user", "response_type": "device_code"},
+        {
+            "client_id": CLIENT_ID,
+            "scope": "profile offline pan sso user",
+            "response_type": "device_code",
+        },
     )
     if response.status_code >= 400:
         raise QrLoginFailed()
@@ -94,7 +102,10 @@ def start_qr(client: httpx.Client) -> StartedQr:
     if not isinstance(complete, str) or not complete:
         if not isinstance(user_code, str) or not user_code:
             raise QrLoginFailed()
-        complete = "https://i.xunlei.com/center/account/personal/qrcode-login/?user_code=" + quote(user_code, safe="")
+        complete = (
+            "https://i.xunlei.com/center/account/personal/qrcode-login/?user_code="
+            + quote(user_code, safe="")
+        )
     return StartedQr(device_code, device_id, _qr_png(_scan_url(complete)), "image/png")
 
 
@@ -124,7 +135,12 @@ def poll_qr(client: httpx.Client, device_code: str, device_id: str) -> PolledQr:
     access = payload.get("access_token")
     refresh = payload.get("refresh_token")
     user_id = payload.get("user_id") or payload.get("sub")
-    if response.status_code >= 400 or not isinstance(access, str) or not isinstance(refresh, str) or not isinstance(user_id, str):
+    if (
+        response.status_code >= 400
+        or not isinstance(access, str)
+        or not isinstance(refresh, str)
+        or not isinstance(user_id, str)
+    ):
         raise QrLoginFailed()
     credential = {
         "access_token": access,

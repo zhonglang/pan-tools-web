@@ -1,6 +1,15 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -12,7 +21,9 @@ class ShareLink(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("pan_accounts.id"), index=True)
-    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"), nullable=True, index=True)
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("jobs.id"), nullable=True, index=True
+    )
     baidu_share_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(255))
     path: Mapped[str] = mapped_column(String(1024))
@@ -42,7 +53,11 @@ class ShareStatSnapshot(Base):
 
 class AccountStatDay(Base):
     __tablename__ = "account_stat_days"
-    __table_args__ = (UniqueConstraint("account_id", "stat_date", name="uq_account_stat_days_account_date"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "stat_date", name="uq_account_stat_days_account_date"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("pan_accounts.id"), index=True)

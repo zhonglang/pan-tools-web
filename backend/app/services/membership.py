@@ -14,7 +14,12 @@ def as_utc(value: datetime | None) -> datetime | None:
 def effective_plan(user: User, now: datetime) -> str:
     expires = as_utc(user.plan_expires_at)
     current = as_utc(now)
-    if user.plan == "paid" and expires is not None and current is not None and expires > current:
+    if (
+        user.plan == "paid"
+        and expires is not None
+        and current is not None
+        and expires > current
+    ):
         return "paid"
     return "free"
 
